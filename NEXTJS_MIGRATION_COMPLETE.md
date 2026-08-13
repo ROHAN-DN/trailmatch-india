@@ -126,6 +126,20 @@ an actual adversarial-shaped test, not just a reading of the diff.
 - **Vercel preview deployment** — scoping doc's step 10. Needs real
   Vercel access; not available here.
 
+## `tsconfig.json` — one real change inside what looked like formatting
+
+`git diff` on `tsconfig.json` showed mostly array reformatting (Next.js
+auto-rewrites this file into its own canonical multi-line format on
+every `build`/`dev` run) — but one line inside that noise was a real
+semantic change, not cosmetic: `"jsx": "preserve"` → `"jsx":
+"react-jsx"`. Checked rather than assumed this was safe: this is Next.js
+aligning the config with React 19's automatic JSX runtime (no more
+implicit `React.createElement` assumption), which is the correct,
+expected outcome of this exact migration. Both `tsc --noEmit` and
+`next build` in the "Verification" section above ran *after* this file
+was already in its new form, so this isn't a theoretical "should be
+fine" — it's already been exercised by every check in this document.
+
 ## Git state
 
 - `master` — pre-migration baseline, tagged `pre-nextjs-16`
