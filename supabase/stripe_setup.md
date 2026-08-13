@@ -1,0 +1,125 @@
+-- TrialMatch India — Stripe Billing Setup Guide
+-- Run billing.sql in Supabase SQL Editor first, then follow the steps below.
+
+-- ══════════════════════════════════════════════════════════════
+-- STEP 1 — Create Stripe account
+-- ══════════════════════════════════════════════════════════════
+-- 1. Go to https://stripe.com → Sign up (use your business email)
+-- 2. Complete India KYC (takes 1–2 business days):
+--    Dashboard → Settings → Business settings → Business details
+--    Required: PAN, GST number (recommended), bank account
+-- 3. Enable INR payments:
+--    Dashboard → Settings → Currencies → Add Indian Rupee (INR)
+
+-- ══════════════════════════════════════════════════════════════
+-- STEP 2 — Create products and prices
+-- ══════════════════════════════════════════════════════════════
+-- Dashboard → Products → Add Product
+
+-- Product 1: TrialMatch Starter
+--   Name:        TrialMatch Starter
+--   Description: Up to 100 patients, 5 team members, email reports, batch matching
+--   Pricing:     ₹7,999 / month (recurring)
+--   Currency:    INR
+--   Copy the Price ID → STRIPE_PRICE_STARTER in .env.local
+
+-- Product 2: TrialMatch Pro
+--   Name:        TrialMatch Pro
+--   Description: Unlimited patients & users, WhatsApp alerts, weekly re-matching, custom branding
+--   Pricing:     ₹19,999 / month (recurring)
+--   Currency:    INR
+--   Copy the Price ID → STRIPE_PRICE_PRO in .env.local
+
+-- ══════════════════════════════════════════════════════════════
+-- STEP 3 — Get API keys
+-- ══════════════════════════════════════════════════════════════
+-- Dashboard → Developers → API Keys
+--   Publishable key (pk_test_...) → STRIPE_PUBLISHABLE_KEY
+--   Secret key (sk_test_...)      → STRIPE_SECRET_KEY
+
+-- IMPORTANT: Use TEST keys during development, LIVE keys for production.
+-- Test cards: https://stripe.com/docs/testing#cards
+--   Success:   4242 4242 4242 4242
+--   Declined:  4000 0000 0000 0002
+--   3D Secure: 4000 0025 0000 3155
+
+-- ══════════════════════════════════════════════════════════════
+-- STEP 4 — Register webhook endpoint
+-- ══════════════════════════════════════════════════════════════
+-- Dashboard → Developers → Webhooks → Add endpoint
+--
+-- Endpoint URL: https://YOUR_VERCEL_URL/api/billing/webhook
+-- Listen to: Select the following events:
+--   ✅ checkout.session.completed
+--   ✅ customer.subscription.created
+--   ✅ customer.subscription.updated
+--   ✅ customer.subscription.deleted
+--   ✅ invoice.payment_succeeded
+--   ✅ invoice.payment_failed
+--
+-- After saving, click "Reveal" under Signing secret
+-- → Copy to STRIPE_WEBHOOK_SECRET in .env.local
+
+-- ══════════════════════════════════════════════════════════════
+-- STEP 5 — Configure Customer Portal
+-- ══════════════════════════════════════════════════════════════
+-- Dashboard → Settings → Billing → Customer portal
+-- Enable: ✅ Cancel subscriptions
+--         ✅ Update payment methods
+--         ✅ View invoice history
+--         ✅ Update billing address
+-- Save the configuration.
+
+-- ══════════════════════════════════════════════════════════════
+-- STEP 6 — Test locally with Stripe CLI
+-- ══════════════════════════════════════════════════════════════
+-- Install: https://stripe.com/docs/stripe-cli
+--
+-- Login:
+--   stripe login
+--
+-- Forward webhooks to local server:
+--   stripe listen --forward-to localhost:3000/api/billing/webhook
+--
+-- This gives you a local webhook secret (whsec_...) to use in .env.local
+-- while testing. Replace with the dashboard secret for production.
+--
+-- Trigger test events:
+--   stripe trigger checkout.session.completed
+--   stripe trigger customer.subscription.updated
+--   stripe trigger invoice.payment_failed
+
+-- ══════════════════════════════════════════════════════════════
+-- STEP 7 — GST considerations (India)
+-- ══════════════════════════════════════════════════════════════
+-- SaaS in India is subject to 18% GST.
+-- Options:
+--   A) Display prices inclusive of GST (simplest for B2B India)
+--   B) Use Stripe Tax (requires GST registration):
+--      Dashboard → Settings → Tax → Enable automatic tax
+--      Then uncomment: automatic_tax: { enabled: true } in lib/stripe.ts
+--
+-- For B2B sales (hospitals/CROs), your customers will want a GST invoice.
+-- Stripe generates these automatically when you enable Stripe Tax.
+-- For now, you can manually issue GST invoices until you scale.
+
+-- ══════════════════════════════════════════════════════════════
+-- STEP 8 — Run billing schema
+-- ══════════════════════════════════════════════════════════════
+-- Already done if you ran billing.sql. Verify:
+--   select table_name from information_schema.tables
+--   where table_schema = 'public' and table_name = 'org_billing';
+-- Should return one row.
+
+-- ══════════════════════════════════════════════════════════════
+-- DONE — Checklist
+-- ══════════════════════════════════════════════════════════════
+-- ☐ Stripe account created + India KYC submitted
+-- ☐ Two products created (Starter ₹7,999 + Pro ₹19,999)
+-- ☐ Price IDs copied to STRIPE_PRICE_STARTER + STRIPE_PRICE_PRO
+-- ☐ API keys copied to STRIPE_SECRET_KEY + STRIPE_PUBLISHABLE_KEY
+-- ☐ Webhook endpoint registered + STRIPE_WEBHOOK_SECRET copied
+-- ☐ Customer Portal configured
+-- ☐ billing.sql run in Supabase SQL Editor
+-- ☐ Tested with Stripe CLI locally
+-- ☐ Switched to LIVE keys before production launch

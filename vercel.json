@@ -1,0 +1,24 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/rematch",
+      "schedule": "0 1 * * 0"
+    },
+    {
+      "path": "/api/cron/mrr-snapshot",
+      "schedule": "0 0 1 * *"
+    },
+    {
+      "path": "/api/cron/data-retention",
+      "schedule": "0 2 * * 1"
+    },
+    {
+      "path": "/api/cron/site-twin-refresh",
+      "schedule": "30 20 * * 0"
+    },
+    {
+      "path": "/api/cron/enrollment-monitor",
+      "schedule": "0 */6 * * *"
+    }
+  ]
+}
