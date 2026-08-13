@@ -265,8 +265,9 @@ deleted, so the history is honest:
 Genuinely still open, as of v17:
 - [ ] White-label custom domain per org (above)
 - [ ] Real-world verification of the CTRI bulk-export endpoint and ABDM Fidelius crypto against their live services — both are implemented and unit-tested but have never touched the real external system (see the ⚠️ note in "What's included")
-- [ ] Next.js 14 → 15/16 migration — ~20 real dependency advisories (SSRF/DoS class) require this; deliberately not attempted alongside smaller fixes given the breaking-change surface across ~45 API routes
+- [x] Next.js 14 → 16 migration — **done.** See `NEXTJS_MIGRATION_PLAN.md` (the scoping doc) and `NEXTJS_MIGRATION_COMPLETE.md` (what actually happened, including two real dependency conflicts found and fixed along the way). Next.js 16.3.0, React 19.2.8, `middleware.ts` → `proxy.ts`. Re-verified: 267/267 tests, clean build, security-audit 9/9, plus a real four-scenario test of `proxy.ts`'s MFA enforcement against actual next-auth tokens.
 - [ ] Real SMTP delivery has not been tested end-to-end (no live credentials available during development)
+- [ ] `npm run lint` was completely unconfigured before the Next.js 16 migration (`next lint`, now removed, had no explicit config to run against). It works now — and surfaces 643 pre-existing findings (591 errors, 52 warnings; the large majority are `no-explicit-any`). None of this is new from the migration; it was simply never visible before. Worth a dedicated cleanup pass — not attempted here, out of scope for "does the app run."
 
 ## v10 → v17 — what's new since the last full changelog update
 
@@ -320,7 +321,7 @@ from a prior session's notes:
 ## Support
 
 Built with:
-- [Next.js 14](https://nextjs.org)
+- [Next.js 16](https://nextjs.org)
 - [Supabase](https://supabase.com)
 - [NextAuth.js](https://next-auth.js.org)
 - [Anthropic Claude](https://anthropic.com)
