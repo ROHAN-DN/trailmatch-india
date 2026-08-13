@@ -2,6 +2,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  experimental: { serverComponentsExternalPackages: ['jspdf'] },
+  serverExternalPackages: ['jspdf'],
 }
 module.exports = nextConfig

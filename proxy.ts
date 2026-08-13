@@ -1,5 +1,7 @@
 /**
- * middleware.ts
+ * proxy.ts (renamed from middleware.ts in the Next.js 16 migration —
+ * same file, same function, same logic; only the name changed, per
+ * Next.js's official middleware-to-proxy codemod)
  *
  * The single, universal enforcement point for "has this session
  * completed MFA, if its role requires it." Deliberately centralized
@@ -54,7 +56,7 @@ const MFA_EXEMPT_PREFIXES = [
   '/auth',                 // signin/error/verify/mfa-challenge/mfa-enroll pages
 ]
 
-export async function middleware(req: NextRequest) {
+export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl
   if (MFA_EXEMPT_PREFIXES.some(p => pathname === p || pathname.startsWith(p + '/'))) {
     return NextResponse.next()
