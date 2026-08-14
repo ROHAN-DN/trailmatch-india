@@ -1,15 +1,22 @@
 import NextAuth, { NextAuthOptions } from 'next-auth'
 import GoogleProvider from 'next-auth/providers/google'
 import EmailProvider from 'next-auth/providers/email'
-import { createClient } from '@supabase/supabase-js'
+import { supabaseAdmin } from '../../../lib/supabase'
 import { checkLimit } from '../../../lib/gate'
 import { PLANS } from '../../../lib/plans'
 import { roleRequiresMFA } from '../../../lib/mfa'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+// REAL BUG FOUND AND FIXED HERE: this file used to create its own
+// separate, eager, top-level Supabase client via createClient(...) at
+// module scope — a duplicate of what lib/supabase.ts already provides
+// correctly as the lazy supabaseAdmin() factory. Same crash as
+// lib/supabase.ts's now-removed eager client: @supabase/supabase-js
+// throws synchronously ("supabaseUrl is required") the moment this
+// module is imported with no NEXT_PUBLIC_SUPABASE_URL set — which
+// crashed `next build` on a real first Vercel deploy, before project
+// env vars were configured. Fixed by using the shared, already-lazy
+// supabaseAdmin() everywhere below instead of a second, independent,
+// eager instance.
 
 export const authOptions: NextAuthOptions = {
   providers: [
@@ -59,7 +66,7 @@ export const authOptions: NextAuthOptions = {
     async signIn({ user }) {
       if (!user.email) return false
       // Upsert user in our DB on every sign-in
-      const { data: existing } = await supabase
+      const { data: existing } = await supabaseAdmin()
         .from('users')
         .select('id, org_id, is_active')
         .eq('email', user.email)
@@ -69,7 +76,7 @@ export const authOptions: NextAuthOptions = {
 
       if (!existing) {
         // Check if invited
-        const { data: invite } = await supabase
+        const { data: invite } = await supabaseAdmin()
           .from('invitations')
           .select('*')
           .eq('email', user.email)
@@ -89,13 +96,13 @@ export const authOptions: NextAuthOptions = {
           if (!userGate.allowed) return false
 
           // Create user under invited org
-          await supabase.from('users').insert({
+          await supabaseAdmin().from('users').insert({
             email:    user.email,
             name:     user.name,
             org_id:   invite.org_id,
             role:     invite.role,
           })
-          await supabase.from('invitations')
+          await supabaseAdmin().from('invitations')
             .update({ accepted_at: new Date().toISOString() })
             .eq('id', invite.id)
         } else {
@@ -108,7 +115,7 @@ export const authOptions: NextAuthOptions = {
           // advertised free-trial capacity. See migration
           // 020_match_job_limits.sql for the full story and the
           // corrected defaults, kept as a defensive backstop.
-          const { data: org } = await supabase
+          const { data: org } = await supabaseAdmin()
             .from('organizations')
             .insert({
               name: `${user.name || user.email}'s Workspace`, type: 'other',
@@ -119,7 +126,7 @@ export const authOptions: NextAuthOptions = {
             })
             .select('id').single()
 
-          await supabase.from('users').insert({
+          await supabaseAdmin().from('users').insert({
             email:   user.email,
             name:    user.name,
             org_id:  org!.id,
@@ -129,7 +136,7 @@ export const authOptions: NextAuthOptions = {
       }
 
       // Update last_login
-      await supabase.from('users')
+      await supabaseAdmin().from('users')
         .update({ last_login: new Date().toISOString(), name: user.name })
         .eq('email', user.email)
 
@@ -156,7 +163,7 @@ export const authOptions: NextAuthOptions = {
         // session callback below re-derives the real, current gate state
         // from a fresh DB read on every call, which is what
         // lib/api-handler.ts's withApiHandler actually enforces against.
-        const { data: dbUser } = await supabase.from('users').select('role').eq('email', user.email).single()
+        const { data: dbUser } = await supabaseAdmin().from('users').select('role').eq('email', user.email).single()
         token.mfaRequired = roleRequiresMFA(dbUser?.role)
         token.mfaVerified = false
       }
@@ -168,7 +175,7 @@ export const authOptions: NextAuthOptions = {
 
     async session({ session, token }) {
       if (!session.user?.email) return session
-      const { data: dbUser } = await supabase
+      const { data: dbUser } = await supabaseAdmin()
         .from('users')
         .select('id, org_id, role, name, mfa_enabled')
         .eq('email', session.user.email)

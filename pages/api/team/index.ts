@@ -5,7 +5,7 @@ import { supabaseAdmin } from '../../../lib/supabase'
 import { checkLimit } from '../../../lib/gate'
 import { Resend } from 'resend'
 
-const resend = new Resend(process.env.RESEND_API_KEY)
+const resendClient = () => new Resend(process.env.RESEND_API_KEY) // lazy — see lib/email.ts for why (eager construction throws when RESEND_API_KEY is unset, crashing `next build`)
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const session = await getServerSession(req, res, authOptions)
@@ -68,7 +68,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const acceptUrl = `${process.env.NEXT_PUBLIC_APP_URL}/auth/accept-invite?token=${invite.token}`
 
-    await resend.emails.send({
+    await resendClient().emails.send({
       from:    process.env.RESEND_FROM_EMAIL!,
       to:      email,
       subject: `You've been invited to ${org?.name} on TrialMatch India`,

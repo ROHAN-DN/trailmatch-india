@@ -1,7 +1,15 @@
 import { Resend } from 'resend'
 import type { Patient, MatchResult } from './matcher'
 
-const resend = new Resend(process.env.RESEND_API_KEY)
+// REAL BUG FOUND AND FIXED HERE (same class as lib/supabase.ts and
+// pages/api/auth/[...nextauth].ts): `new Resend(undefined)` throws
+// synchronously — "Missing API key" — confirmed directly against the
+// installed SDK. This file's top-level, eager `const resend = new
+// Resend(...)` crashed `next build` the moment this module was
+// imported without RESEND_API_KEY set, exactly like the Supabase
+// cases. Fixed with the same lazy-factory pattern used throughout this
+// codebase (see lib/supabase.ts's supabaseAdmin).
+const resendClient = () => new Resend(process.env.RESEND_API_KEY)
 
 interface SendReportOptions {
   to:        string
@@ -33,7 +41,7 @@ export async function sendMatchReport({
       </tr>`
   }).join('')
 
-  await resend.emails.send({
+  await resendClient().emails.send({
     from:    process.env.RESEND_FROM_EMAIL!,
     to,
     subject: `Trial match report — ${patient.patient_code} (${patient.diagnosis})`,
@@ -140,7 +148,7 @@ export interface SendEmailOptions {
 }
 
 export async function sendEmail({ to, subject, html, text, from }: SendEmailOptions) {
-  await resend.emails.send({
+  await resendClient().emails.send({
     from:    from || process.env.RESEND_FROM_EMAIL!,
     to,
     subject,
