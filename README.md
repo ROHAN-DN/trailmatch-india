@@ -171,10 +171,13 @@ After deploy:
   the five, `data-retention`, is the DPDP Act storage-minimisation job — worth
   confirming it actually fires once, via Vercel's dashboard → your project →
   Cron Jobs → the "Run" button, rather than trusting the schedule blindly.
-- **Check your Vercel plan tier against the schedules.** `enrollment-monitor`
-  runs every 6 hours (`0 */6 * * *`). Vercel's Hobby plan only reliably
-  supports daily-or-longer schedules; sub-daily cron expressions need at
-  least a Pro plan.
+- **`enrollment-monitor` runs once daily** (`30 0 * * *`, 00:30 UTC / 06:00
+  IST), not every 6 hours — confirmed against a real Hobby-plan deploy: Vercel
+  rejects the whole deployment outright if any cron entry is more frequent
+  than daily on that plan. If you're on Pro, or move this specific job to
+  Supabase pg_cron instead (see the comment at the top of
+  `pages/api/cron/enrollment-monitor.ts`), `"0 */6 * * *"` gets you back to
+  6-hourly monitoring.
 
 ---
 

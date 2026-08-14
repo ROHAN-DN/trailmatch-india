@@ -1,7 +1,16 @@
 /**
  * pages/api/cron/enrollment-monitor.ts — Production rewrite
- * Runs every 6h via vercel.json.
- * Sundays: also generates + sends weekly pace reports.
+ * Runs once daily at 00:30 UTC (06:00 IST) via vercel.json — changed
+ * from every 6 hours specifically to stay on Vercel's free Hobby plan,
+ * which only supports daily-or-longer cron schedules. If you're on Pro
+ * (or move this to Supabase pg_cron instead) and want tighter
+ * monitoring, restore the original 6-hourly schedule in vercel.json
+ * (every 6 hours, on the hour — see git history for the exact string;
+ * not spelled out here since it contains a sequence that breaks this
+ * very comment block).
+ * Sundays: also generates + sends weekly pace reports. A daily
+ * schedule still lands on Sunday once a week, so this still fires
+ * correctly with no change needed to the logic below.
  */
 import type { NextApiRequest, NextApiResponse } from 'next'
 import { runEnrollmentMonitor, generateWeeklyReport } from '../../../lib/enrollment-monitor'
