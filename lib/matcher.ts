@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk'
+import { createChatCompletion } from './llm-provider'
 import {
   evaluateCriteria, summarizeDeterministicResults, CriterionArray,
   type Criterion, type EvaluableClinicalData, type EvaluatedCriterion,
@@ -8,7 +8,9 @@ import { enrichMedicationsWithRxNorm } from './rxnorm'
 import { hashEligibilityText, type TrialCriteriaCacheStore } from './trial-criteria-cache'
 import { parseCTRIBulkExport, filterCTRIBulkTrialsByDiagnosis } from './ctri-bulk-export'
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+// Real Anthropic client construction moved to lib/llm-provider.ts, which
+// also holds the temporary free-model testing shim — see that file's
+// header comment for how to use it and why it's there.
 
 export interface Patient {
   id?:              string
@@ -422,7 +424,7 @@ structuredCriteria; a separate per-patient step handles judgment calls like that
 If a trial's "Remaining eligibility statements" contains nothing objectively extractable, return an empty
 structuredCriteria array for it — do not omit the trial from the response entirely.`
 
-  const response = await anthropic.messages.create({
+  const response = await createChatCompletion({
     model:      'claude-sonnet-4-20250514',
     max_tokens: 3000,
     messages:   [{ role: 'user', content: prompt }],
@@ -666,7 +668,7 @@ automatically if any structuredCriteria entry turns out to fail against the pati
 regardless of what you set here — treat this field as your best estimate from the interpreted
 criteria only, not a final answer.`
 
-  const response = await anthropic.messages.create({
+  const response = await createChatCompletion({
     model:      'claude-sonnet-4-20250514',
     max_tokens: 4000,
     messages:   [{ role: 'user', content: prompt }],
