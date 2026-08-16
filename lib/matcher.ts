@@ -1,4 +1,4 @@
-import { createChatCompletion } from './llm-provider'
+import { createChatCompletion, resolveLLMConfig, type LLMProviderConfig } from './llm-provider'
 import {
   evaluateCriteria, summarizeDeterministicResults, CriterionArray,
   type Criterion, type EvaluableClinicalData, type EvaluatedCriterion,
@@ -14,6 +14,7 @@ import { parseCTRIBulkExport, filterCTRIBulkTrialsByDiagnosis } from './ctri-bul
 
 export interface Patient {
   id?:              string
+  org_id?:          string
   patient_code:     string
   age:              number
   sex:              string
@@ -360,7 +361,8 @@ function criterionKey(c: Criterion): string {
 // cache miss with real residual text — see scoreWithClaude's call site.
 async function extractResidualCriteriaViaClaude(
   trialsNeedingExtraction: RawTrial[],
-  extractionByTrial: Map<string, { unparsedStatements: string[]; knownCriteria: Criterion[] }>
+  extractionByTrial: Map<string, { unparsedStatements: string[]; knownCriteria: Criterion[] }>,
+  llmConfig: LLMProviderConfig
 ): Promise<Map<string, Criterion[]>> {
   const trialsBlock = trialsNeedingExtraction.map((t, i) => {
     const ctx = extractionByTrial.get(t.nctId)!
@@ -425,10 +427,9 @@ If a trial's "Remaining eligibility statements" contains nothing objectively ext
 structuredCriteria array for it — do not omit the trial from the response entirely.`
 
   const response = await createChatCompletion({
-    model:      'claude-sonnet-4-20250514',
     max_tokens: 3000,
     messages:   [{ role: 'user', content: prompt }],
-  })
+  }, llmConfig)
 
   const raw   = response.content.map(c => (c as any).text || '').join('')
   const clean = raw.replace(/```json|```/g, '').trim()
@@ -479,6 +480,11 @@ structuredCriteria array for it — do not omit the trial from the response enti
 
 // ── Claude AI matching ────────────────────────────────────────
 async function scoreWithClaude(patient: Patient, trials: RawTrial[], sourceStatus: SourceStatus, clinicalData: ClinicalData | null, cacheStore?: TrialCriteriaCacheStore): Promise<MatchResult> {
+  // Resolved once per match run (not once per call) so both Claude calls
+  // below use the same provider/model, and so an org's provider config
+  // is only read from the DB once per run, not twice.
+  const llmConfig = await resolveLLMConfig(patient.org_id)
+
   const ctgovCount = trials.filter(t => t.source === 'ClinicalTrials.gov').length
   const ctriCount  = trials.filter(t => t.source === 'CTRI').length
 
@@ -564,7 +570,7 @@ async function scoreWithClaude(patient: Patient, trials: RawTrial[], sourceStatu
     return !ctx.cacheHit && ctx.unparsedStatements.length > 0
   })
   if (trialsNeedingExtraction.length > 0) {
-    const extracted = await extractResidualCriteriaViaClaude(trialsNeedingExtraction, extractionByTrial)
+    const extracted = await extractResidualCriteriaViaClaude(trialsNeedingExtraction, extractionByTrial, llmConfig)
     for (const t of trialsNeedingExtraction) {
       const ctx = extractionByTrial.get(t.nctId)!
       const newlyExtracted = extracted.get(t.nctId) ?? []
@@ -669,10 +675,9 @@ regardless of what you set here — treat this field as your best estimate from 
 criteria only, not a final answer.`
 
   const response = await createChatCompletion({
-    model:      'claude-sonnet-4-20250514',
     max_tokens: 4000,
     messages:   [{ role: 'user', content: prompt }],
-  })
+  }, llmConfig)
 
   const raw   = response.content.map(c => (c as any).text || '').join('')
   const clean = raw.replace(/```json|```/g, '').trim()

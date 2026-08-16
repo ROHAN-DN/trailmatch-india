@@ -90,10 +90,38 @@ for the full reasoning.
 
 ### Step 3 — Get your API keys
 
-**Anthropic (Claude AI)**
+**AI provider — the matching engine itself**
+
+This app is **not locked to any single AI provider.** Every organization
+using this deployment can configure its own provider (own API key, own
+model) via Settings → AI provider — different orgs sharing one
+deployment can each use a different vendor, encrypted at rest, same
+pattern as MFA secrets. An org that configures nothing falls back to
+the platform-wide default below, so the simplest path (one Anthropic
+key for the whole deployment) still works exactly as before:
+
 1. Go to https://console.anthropic.com
 2. API Keys → Create Key
 3. Copy → `ANTHROPIC_API_KEY`
+
+Supported natively: Anthropic, OpenAI, Google Gemini. Anything else —
+Groq, OpenRouter, Together, Azure OpenAI, a self-hosted model — works
+via the generic `openai_compatible` option, since most providers
+implement an OpenAI-compatible endpoint. See `lib/llm-provider.ts`'s
+header comment for exactly how provider resolution works and what env
+vars control the platform-wide default (`LLM_PLATFORM_PROVIDER`,
+`LLM_PLATFORM_API_KEY`, `LLM_PLATFORM_MODEL`, `LLM_PLATFORM_BASE_URL` —
+all optional; unset means "use Anthropic via `ANTHROPIC_API_KEY`",
+exactly the original behavior).
+
+**`LLM_CREDENTIAL_ENCRYPTION_KEY`** — required if any org configures
+its own provider (not required for the simple, single-platform-key
+setup). Generate the same way as `MFA_ENCRYPTION_KEY`, but as its own,
+separate key — never reuse the MFA key here; a compromised AI provider
+key and a compromised MFA secret should never share a blast radius:
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
 
 **Resend (email)**
 1. Go to https://resend.com → free account
@@ -586,6 +614,8 @@ with this order:
 7. `supabase/migrations/011_audit_log.sql` — **this one used to hard-crash on a fresh deploy.** It defines a richer `audit_log` schema than `schema.sql` already created, and (until this build) then queried two of those new columns in the very same script — a real error that aborted everything after it, silently skipping RLS, both intended policies, both tamper-prevention rules, and the entire `consent_records` table (the DPDP Act §6 consent-tracking table), every single time, for every deploy. Confirmed by actually running it, not inferred. Fixed in this build — 011 now completes cleanly on a fresh database.
 8. `supabase/migrations/012_match_accuracy.sql` through `024_failure_prediction.sql`, in numeric order
 9. `supabase/migrations/025_audit_log_rls_fix.sql` — **new in this build.** `schema.sql` separately creates a broad `org_isolation_audit` policy on `audit_log` granting every org member full SELECT/INSERT/UPDATE/DELETE. Since Postgres RLS policies OR together, that policy was never actually superseded by 011's much narrower, intentional design (admins/owners read-only, service-role insert-only, nobody can update/delete) — it just sat alongside it, quietly granting every org member read access to the full audit log and the ability to insert fabricated entries, undermining the "tamper-proof, immutable" property the table's own header comment promises. This migration removes that one policy from `audit_log` specifically (nowhere else — it's the correct model on other tables) and, as a safety net, idempotently re-applies everything 011 should have created for anyone who deployed before this fix.
+10. `supabase/migrations/026_rematch_runs_rls_fix.sql` — `rematch_runs` had RLS enabled (migration 014) but zero policies were ever added — default-deny, harmless in practice since nothing reads/writes this table yet, but it would have silently blocked any future legitimate use. Adds the missing service-role-only policy, matching the pattern already used by `mrr_snapshots`.
+11. `supabase/migrations/027_llm_provider_settings.sql` — adds per-organization AI provider configuration (`llm_provider`, encrypted `llm_api_key_encrypted`, `llm_model`, `llm_base_url`). See "AI provider" further up for what this enables.
 
 Migrations 011 and 012 are also individually patched in place by 016 and
 022 — run everything in order and each fix migration corrects the

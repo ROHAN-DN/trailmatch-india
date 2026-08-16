@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import MFASettingsCard from './MFASettingsCard'
+import AIProviderSettingsCard from './AIProviderSettingsCard'
 
 interface SettingsProps { org: any; usage: any; onSave: () => void; brandColor: string }
 
@@ -92,6 +93,7 @@ export default function SettingsPanel({ org, usage, onSave, brandColor }: Settin
       </form>
 
       <MFASettingsCard brandColor={brandColor} />
+      <AIProviderSettingsCard org={org} brandColor={brandColor} onSave={onSave} />
     </div>
   )
 }

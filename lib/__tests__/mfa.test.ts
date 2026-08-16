@@ -73,7 +73,7 @@ describe('encryptSecret / decryptSecret', () => {
   })
 
   it('throws on a malformed (wrong-shape) encrypted string', () => {
-    expect(() => decryptSecret('not-the-right-format')).toThrow('Malformed encrypted MFA secret')
+    expect(() => decryptSecret('not-the-right-format')).toThrow('Malformed encrypted value')
   })
 
   it('throws clearly when MFA_ENCRYPTION_KEY is missing', () => {

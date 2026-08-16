@@ -16,10 +16,11 @@
  * all) and the qrcode package for enrollment QR codes.
  */
 
-import { randomBytes, createCipheriv, createDecipheriv, createHash, timingSafeEqual } from 'crypto'
+import { randomBytes, createHash, timingSafeEqual } from 'crypto'
 import { generateSecret as otpGenerateSecret, verify as otpVerify, generateURI } from 'otplib'
 import QRCode from 'qrcode'
 import type { UserRole } from './types/domain'
+import { encrypt, decrypt, parseEncryptionKey } from './encryption'
 
 /** Roles that require MFA — the "privileged roles" this project's own Tier 4 disclosure named. Not coordinator/viewer: those can't manage team members, billing, or org settings, and forcing MFA on every staff account across a hospital would be a real adoption barrier for a control that matters most where the actual privilege is. */
 export const PRIVILEGED_ROLES: UserRole[] = ['owner', 'admin']
@@ -37,9 +38,6 @@ export function roleRequiresMFA(role: UserRole | string | null | undefined): boo
 // for this specific operation, consistent with lib/fidelius.ts's own use
 // of well-established, standard primitives rather than anything novel.
 
-const ALGORITHM = 'aes-256-gcm'
-const IV_LENGTH  = 12 // standard/recommended IV size for GCM
-
 function getEncryptionKey(): Buffer {
   const key = process.env.MFA_ENCRYPTION_KEY
   if (!key) {
@@ -49,33 +47,17 @@ function getEncryptionKey(): Buffer {
       'and set it before any MFA secret can be encrypted or decrypted.'
     )
   }
-  const buf = Buffer.from(key, 'hex')
-  if (buf.length !== 32) {
-    throw new Error(`MFA_ENCRYPTION_KEY must decode to exactly 32 bytes (64 hex characters) for AES-256 — got ${buf.length} bytes.`)
-  }
-  return buf
+  return parseEncryptionKey(key, 'MFA_ENCRYPTION_KEY')
 }
 
 /** Encrypts a TOTP secret for storage. Output format: `iv:authTag:ciphertext`, all hex — self-contained, no separate IV storage needed. */
 export function encryptSecret(plaintext: string): string {
-  const key = getEncryptionKey()
-  const iv  = randomBytes(IV_LENGTH)
-  const cipher = createCipheriv(ALGORITHM, key, iv)
-  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
-  const authTag = cipher.getAuthTag()
-  return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`
+  return encrypt(plaintext, getEncryptionKey())
 }
 
 /** Decrypts a secret produced by encryptSecret. Throws (does not silently return garbage) on any tampering, corruption, or wrong key — GCM's auth tag check fails closed. */
 export function decryptSecret(encoded: string): string {
-  const parts = encoded.split(':')
-  if (parts.length !== 3) throw new Error('Malformed encrypted MFA secret — expected iv:authTag:ciphertext format.')
-  const [ivHex, authTagHex, dataHex] = parts
-  const key = getEncryptionKey()
-  const decipher = createDecipheriv(ALGORITHM, key, Buffer.from(ivHex, 'hex'))
-  decipher.setAuthTag(Buffer.from(authTagHex, 'hex'))
-  const decrypted = Buffer.concat([decipher.update(Buffer.from(dataHex, 'hex')), decipher.final()])
-  return decrypted.toString('utf8')
+  return decrypt(encoded, getEncryptionKey())
 }
 
 // ── TOTP enrollment ──────────────────────────────────────────────

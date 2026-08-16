@@ -1,53 +1,61 @@
 /**
  * lib/llm-provider.ts
  *
- * ⚠️ TEMPORARY TESTING SHIM — not meant to stay in this codebase long-term.
+ * Multi-provider LLM abstraction. This app's matching engine was
+ * originally hardcoded to `@anthropic-ai/sdk`'s specific request/response
+ * format — meaning choosing this product meant choosing Claude
+ * specifically, with no way for an org to use a different provider
+ * without editing code. That's a real adoption barrier for a B2B SaaS,
+ * and it was also architecturally inconsistent with everything else
+ * here: billing, branding, WhatsApp numbers, notification preferences
+ * are all per-organization settings already. AI provider being the one
+ * hardcoded, platform-wide exception didn't fit.
  *
- * Why this exists: to test the rest of this app (UI, database writes, PDF
- * generation, the whole pipeline) without an Anthropic API key yet, this
- * lets ONE env var swap the two Claude calls in lib/matcher.ts for a free
- * OpenRouter model instead — without touching matcher.ts's actual request
- * construction or response parsing at all.
+ * Design: each organization can configure its own provider + API key
+ * (encrypted at rest — see lib/encryption.ts) via Settings. An org that
+ * hasn't configured anything falls back to the platform-wide default,
+ * controlled by env vars, so nothing breaks for existing deployments
+ * that only ever set ANTHROPIC_API_KEY.
  *
- * Default behavior (LLM_TEST_PROVIDER unset): identical to before this
- * file existed — calls real Anthropic, same model, same everything.
- * matcher.ts's own prompts and extraction logic are tuned for Claude
- * specifically; a free open-weight model will very likely extract and
- * score less accurately. This is for exercising the pipeline end-to-end,
- * not for judging real match quality. Switch back to real Anthropic
- * (just unset LLM_TEST_PROVIDER) before trusting any output for real.
+ * Supported natively: Anthropic, OpenAI, Google Gemini. For everything
+ * else — Groq, OpenRouter, Together, Azure OpenAI, self-hosted
+ * vLLM/Ollama with an OpenAI-compatible shim, and most other providers —
+ * 'openai_compatible' covers it with one implementation, since the
+ * OpenAI Chat Completions request/response shape has become a de facto
+ * standard most providers implement for compatibility.
  *
- * To use:
- *   1. Get a free OpenRouter API key: https://openrouter.ai/keys
- *      (email/GitHub signup, no card needed)
- *   2. Pick a model CURRENTLY marked free at
- *      https://openrouter.ai/models?order=pricing-low-to-high — the free
- *      lineup rotates, sometimes weekly, so don't reuse an ID from an old
- *      blog post or from this comment. Confirm it shows $0 input/output
- *      on OpenRouter's own site right before you use it.
- *   3. Set these three env vars:
- *        LLM_TEST_PROVIDER=openrouter
- *        OPENROUTER_API_KEY=<your key>
- *        OPENROUTER_MODEL=<the exact id you picked, e.g. "meta-llama/llama-3.3-70b-instruct:free">
+ * Every provider function normalizes its response into the same
+ * {content: [{text: string}]} shape, so nothing in lib/matcher.ts needs
+ * to know or care which provider actually served a given call.
  *
- * Real limits to expect (OpenRouter's free tier, not something this app
- * controls): roughly 20 requests/minute, 50/day before any credit
- * purchase. Each match run makes 2 calls, so that's enough for maybe
- * 20-25 test matches a day.
- *
- * NOT tested live against OpenRouter's actual API from the sandbox this
- * was written in — that domain isn't reachable from there (confirmed:
- * a direct request came back `403, x-deny-reason: host_not_allowed`).
- * This is written carefully and type-checks cleanly, but the first real
- * call is a genuine, unverified first for this specific code path.
+ * Honest limitation: only the Anthropic path has been exercised against
+ * a real API in this project's own testing (it's what every match run
+ * has used so far). The OpenAI, Google, and openai_compatible request
+ * shapes below are built from each provider's current, real documented
+ * API format — verified against actual current docs, not assumed from
+ * memory — but none of the three has been called against a live
+ * endpoint from this environment (the relevant API domains aren't
+ * reachable from here — the same network wall documented in this
+ * project's git history for OpenRouter, Docker Hub, and Vercel earlier).
+ * The first real call to any of the three is a genuine first.
  */
 
 import Anthropic from '@anthropic-ai/sdk'
+import { supabaseAdmin } from './supabase'
+import { decrypt, parseEncryptionKey } from './encryption'
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+export type LLMProviderName = 'anthropic' | 'openai' | 'google' | 'openai_compatible'
+
+export const LLM_PROVIDER_NAMES: LLMProviderName[] = ['anthropic', 'openai', 'google', 'openai_compatible']
+
+export interface LLMProviderConfig {
+  provider: LLMProviderName
+  apiKey:   string
+  model:    string
+  baseUrl?: string  // required for openai_compatible; ignored otherwise
+}
 
 interface ChatCompletionRequest {
-  model:      string
   max_tokens: number
   messages:   { role: 'user'; content: string }[]
 }
@@ -56,40 +64,132 @@ interface ChatCompletionResponse {
   content: { text: string }[]
 }
 
-export async function createChatCompletion(req: ChatCompletionRequest): Promise<ChatCompletionResponse> {
-  if (process.env.LLM_TEST_PROVIDER === 'openrouter') {
-    return callOpenRouterFree(req)
+function defaultModelFor(provider: LLMProviderName): string {
+  switch (provider) {
+    case 'anthropic': return 'claude-sonnet-4-20250514'
+    // Sensible starting defaults only — always overridable via the org's
+    // configured model or LLM_PLATFORM_MODEL. Check each provider's
+    // current model lineup yourself before relying on either of these;
+    // they will go stale.
+    case 'openai':    return 'gpt-4o'
+    case 'google':    return 'gemini-2.0-flash'
+    default:           return ''
+  }
+}
+
+/**
+ * Resolves which provider/credentials to use for a given org. Priority:
+ * the org's own configured provider (DB, encrypted) > the platform-wide
+ * default (env vars). Fails open to the platform default on any lookup
+ * error — a DB hiccup on config lookup should never be why a match run
+ * fails outright, any more than the rate limiter failing open is.
+ */
+export async function resolveLLMConfig(orgId: string | null | undefined): Promise<LLMProviderConfig> {
+  if (orgId) {
+    try {
+      const { data } = await supabaseAdmin()
+        .from('organizations')
+        .select('llm_provider, llm_api_key_encrypted, llm_model, llm_base_url')
+        .eq('id', orgId)
+        .single()
+
+      if (data?.llm_provider && data?.llm_api_key_encrypted) {
+        const keyEnv = process.env.LLM_CREDENTIAL_ENCRYPTION_KEY
+        if (!keyEnv) {
+          console.error('[llm-provider] Org has a configured provider but LLM_CREDENTIAL_ENCRYPTION_KEY is not set — cannot decrypt. Falling back to platform default.')
+        } else {
+          const apiKey = decrypt(data.llm_api_key_encrypted, parseEncryptionKey(keyEnv, 'LLM_CREDENTIAL_ENCRYPTION_KEY'))
+          return {
+            provider: data.llm_provider as LLMProviderName,
+            apiKey,
+            model:    data.llm_model || defaultModelFor(data.llm_provider as LLMProviderName),
+            baseUrl:  data.llm_base_url || undefined,
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[llm-provider] Failed to resolve org-specific LLM config for org ${orgId}, falling back to platform default:`, err)
+    }
+  }
+  return getPlatformDefaultConfig()
+}
+
+function getPlatformDefaultConfig(): LLMProviderConfig {
+  // Backward compatibility: the earlier, OpenRouter-only testing shim
+  // used LLM_TEST_PROVIDER=openrouter + OPENROUTER_API_KEY + OPENROUTER_MODEL.
+  // If those are set and the new, general LLM_PLATFORM_* scheme isn't,
+  // honor them rather than silently falling back to Anthropic — someone
+  // may already have this configured live from that earlier setup guide.
+  if (!process.env.LLM_PLATFORM_PROVIDER && process.env.LLM_TEST_PROVIDER === 'openrouter') {
+    return {
+      provider: 'openai_compatible',
+      apiKey:   process.env.OPENROUTER_API_KEY || '',
+      model:    process.env.OPENROUTER_MODEL || '',
+      baseUrl:  'https://openrouter.ai/api/v1',
+    }
   }
 
-  // Default path — real Anthropic, unchanged from before this file existed.
-  const response = await anthropic.messages.create(req)
+  const provider = (process.env.LLM_PLATFORM_PROVIDER as LLMProviderName) || 'anthropic'
+
+  if (provider === 'anthropic') {
+    return {
+      provider: 'anthropic',
+      apiKey:   process.env.LLM_PLATFORM_API_KEY || process.env.ANTHROPIC_API_KEY || '',
+      model:    process.env.LLM_PLATFORM_MODEL || defaultModelFor('anthropic'),
+    }
+  }
+
+  return {
+    provider,
+    apiKey:   process.env.LLM_PLATFORM_API_KEY || '',
+    model:    process.env.LLM_PLATFORM_MODEL || defaultModelFor(provider),
+    baseUrl:  process.env.LLM_PLATFORM_BASE_URL || undefined,
+  }
+}
+
+export async function createChatCompletion(
+  req: ChatCompletionRequest,
+  config: LLMProviderConfig
+): Promise<ChatCompletionResponse> {
+  switch (config.provider) {
+    case 'anthropic':         return callAnthropic(req, config)
+    case 'openai':            return callOpenAIShape(req, config, 'https://api.openai.com/v1')
+    case 'openai_compatible': return callOpenAIShape(req, config, requireBaseUrl(config))
+    case 'google':            return callGoogle(req, config)
+    default: {
+      const _exhaustive: never = config.provider
+      throw new Error(`Unknown LLM provider: ${_exhaustive}`)
+    }
+  }
+}
+
+function requireBaseUrl(config: LLMProviderConfig): string {
+  if (!config.baseUrl) {
+    throw new Error('provider "openai_compatible" requires baseUrl to be set (the custom endpoint\'s base URL, e.g. "https://api.groq.com/openai/v1").')
+  }
+  return config.baseUrl
+}
+
+async function callAnthropic(req: ChatCompletionRequest, config: LLMProviderConfig): Promise<ChatCompletionResponse> {
+  const anthropic = new Anthropic({ apiKey: config.apiKey })
+  const response = await anthropic.messages.create({
+    model:      config.model,
+    max_tokens: req.max_tokens,
+    messages:   req.messages,
+  })
   return { content: response.content.map(c => ({ text: (c as any).text || '' })) }
 }
 
-async function callOpenRouterFree(req: ChatCompletionRequest): Promise<ChatCompletionResponse> {
-  const model = process.env.OPENROUTER_MODEL
-  if (!model) {
-    throw new Error(
-      'LLM_TEST_PROVIDER=openrouter is set but OPENROUTER_MODEL is not. Pick a model currently ' +
-      'marked $0/token at https://openrouter.ai/models?order=pricing-low-to-high (id usually ends ' +
-      'in ":free") and set OPENROUTER_MODEL to that exact id. The free lineup rotates — verify it ' +
-      'live rather than reusing an old id.'
-    )
-  }
-
-  const apiKey = process.env.OPENROUTER_API_KEY
-  if (!apiKey) {
-    throw new Error('LLM_TEST_PROVIDER=openrouter is set but OPENROUTER_API_KEY is not. Get a free key at https://openrouter.ai/keys.')
-  }
-
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+/** Shared by both 'openai' and 'openai_compatible' — same request/response shape, only the base URL differs. */
+async function callOpenAIShape(req: ChatCompletionRequest, config: LLMProviderConfig, baseUrl: string): Promise<ChatCompletionResponse> {
+  const res = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
     method:  'POST',
     headers: {
       'Content-Type':  'application/json',
-      'Authorization': `Bearer ${apiKey}`,
+      'Authorization': `Bearer ${config.apiKey}`,
     },
     body: JSON.stringify({
-      model,
+      model:      config.model,
       max_tokens: req.max_tokens,
       messages:   req.messages,
     }),
@@ -97,16 +197,41 @@ async function callOpenRouterFree(req: ChatCompletionRequest): Promise<ChatCompl
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '')
-    throw new Error(
-      `OpenRouter request failed: ${res.status} ${res.statusText} — ${errText.slice(0, 500)}. ` +
-      `If this is a 404/400 on the model, it likely rotated out of the free tier — check ` +
-      `https://openrouter.ai/models?order=pricing-low-to-high for a current one. If it's 429, ` +
-      `you've hit the free-tier rate limit (roughly 20/min, 50/day) — wait or add $10 credit ` +
-      `(never expires, raises the daily cap to 1000).`
-    )
+    throw new Error(`${config.provider} request failed: ${res.status} ${res.statusText} — ${errText.slice(0, 500)}`)
   }
 
   const data = await res.json()
   const text = data?.choices?.[0]?.message?.content ?? ''
+  return { content: [{ text }] }
+}
+
+async function callGoogle(req: ChatCompletionRequest, config: LLMProviderConfig): Promise<ChatCompletionResponse> {
+  // Current documented shape (verified against ai.google.dev, not assumed):
+  // POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
+  // header x-goog-api-key, body { contents: [{ role, parts: [{ text }] }], generationConfig: { maxOutputTokens } }
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent`
+
+  const res = await fetch(url, {
+    method:  'POST',
+    headers: {
+      'Content-Type':  'application/json',
+      'x-goog-api-key': config.apiKey,
+    },
+    body: JSON.stringify({
+      contents: req.messages.map(m => ({
+        role:  m.role === 'user' ? 'user' : 'model',
+        parts: [{ text: m.content }],
+      })),
+      generationConfig: { maxOutputTokens: req.max_tokens },
+    }),
+  })
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '')
+    throw new Error(`google request failed: ${res.status} ${res.statusText} — ${errText.slice(0, 500)}`)
+  }
+
+  const data = await res.json()
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
   return { content: [{ text }] }
 }

@@ -2,6 +2,8 @@ import type { NextApiRequest, NextApiResponse } from 'next'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '../auth/[...nextauth]'
 import { supabaseAdmin } from '../../../lib/supabase'
+import { encrypt, decrypt, parseEncryptionKey } from '../../../lib/encryption'
+import { LLM_PROVIDER_NAMES, type LLMProviderName } from '../../../lib/llm-provider'
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const session = await getServerSession(req, res, authOptions)
@@ -31,8 +33,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       .select('*', { count: 'exact', head: true })
       .eq('org_id', user.org_id)
 
+    // The encrypted key itself is never sent to the browser — not even
+    // to the org that owns it. Only whether one is configured, and
+    // which provider/model, so the UI can show "configured" without
+    // ever having the ciphertext (or worse, a decrypted key) pass
+    // through a response body.
+    const orgSafe = org ? { ...org, llm_api_key_encrypted: undefined, llm_api_key_configured: !!org.llm_api_key_encrypted } : org
+
     return res.json({
-      org,
+      org: orgSafe,
       usage: { patients: patientCount, users: userCount, jobs: jobCount },
     })
   }
@@ -49,6 +58,47 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (req.body[key] !== undefined) updates[key] = req.body[key]
     }
 
+    // AI provider configuration — separate validated path, since it
+    // involves encryption and its own constraints (openai_compatible
+    // needs a base URL; every other provider doesn't).
+    if (req.body.llm_provider !== undefined) {
+      const provider = req.body.llm_provider
+
+      if (provider === null) {
+        // Explicit reset back to "use the platform default" — clears
+        // everything rather than leaving a stale key with no provider.
+        updates.llm_provider = null
+        updates.llm_api_key_encrypted = null
+        updates.llm_model = null
+        updates.llm_base_url = null
+        updates.llm_configured_at = null
+        updates.llm_configured_by = null
+      } else {
+        if (!LLM_PROVIDER_NAMES.includes(provider)) {
+          return res.status(400).json({ error: `llm_provider must be one of ${LLM_PROVIDER_NAMES.join(', ')} or null` })
+        }
+        if (provider === 'openai_compatible' && !req.body.llm_base_url) {
+          return res.status(400).json({ error: 'llm_base_url is required when llm_provider is "openai_compatible"' })
+        }
+        // A new key is only ever provided when the admin is actually
+        // setting/rotating one — leaving the field blank in the UI on
+        // a subsequent save (e.g. just changing the model name) must
+        // not silently wipe out an already-configured key.
+        if (req.body.llm_api_key) {
+          const keyEnv = process.env.LLM_CREDENTIAL_ENCRYPTION_KEY
+          if (!keyEnv) {
+            return res.status(500).json({ error: 'Server is not configured to store AI provider credentials (LLM_CREDENTIAL_ENCRYPTION_KEY is not set). Contact your administrator.' })
+          }
+          updates.llm_api_key_encrypted = encrypt(req.body.llm_api_key, parseEncryptionKey(keyEnv, 'LLM_CREDENTIAL_ENCRYPTION_KEY'))
+        }
+        updates.llm_provider = provider
+        if (req.body.llm_model !== undefined)    updates.llm_model    = req.body.llm_model || null
+        if (req.body.llm_base_url !== undefined) updates.llm_base_url = req.body.llm_base_url || null
+        updates.llm_configured_at = new Date().toISOString()
+        updates.llm_configured_by = user.id
+      }
+    }
+
     const { data, error } = await db.from('organizations')
       .update(updates)
       .eq('id', user.org_id)
@@ -60,10 +110,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       org_id:   user.org_id,
       user_id:  user.id,
       action:   'update_org_settings',
-      metadata: updates,
+      // Never log the actual key, encrypted or not, into the audit
+      // trail — only that a provider change happened and to what.
+      metadata: { ...updates, llm_api_key_encrypted: updates.llm_api_key_encrypted ? '[redacted]' : undefined },
     })
 
-    return res.json({ org: data })
+    const dataSafe = data ? { ...data, llm_api_key_encrypted: undefined, llm_api_key_configured: !!data.llm_api_key_encrypted } : data
+
+    return res.json({ org: dataSafe })
   }
 
   res.setHeader('Allow', ['GET', 'PATCH'])
