@@ -57,6 +57,7 @@ export interface LLMProviderConfig {
 
 interface ChatCompletionRequest {
   max_tokens: number
+  system?:    string
   messages:   { role: 'user'; content: string }[]
 }
 
@@ -66,7 +67,15 @@ interface ChatCompletionResponse {
 
 function defaultModelFor(provider: LLMProviderName): string {
   switch (provider) {
-    case 'anthropic': return 'claude-sonnet-4-20250514'
+    // REAL BUG FOUND AND FIXED HERE (caught in review, not a user report):
+    // this previously defaulted to 'claude-sonnet-4-20250514' — the exact
+    // string lib/matcher.ts had been hardcoded to for this entire
+    // engagement. Checked rather than assumed: that model was deprecated
+    // with retirement scheduled for June 15, 2026 — already past as of
+    // this fix. Every real Claude call in this app, past and present,
+    // would have failed against a real API key. 'claude-sonnet-5' is
+    // confirmed current.
+    case 'anthropic': return 'claude-sonnet-5'
     // Sensible starting defaults only — always overridable via the org's
     // configured model or LLM_PLATFORM_MODEL. Check each provider's
     // current model lineup yourself before relying on either of these;
@@ -175,13 +184,18 @@ async function callAnthropic(req: ChatCompletionRequest, config: LLMProviderConf
   const response = await anthropic.messages.create({
     model:      config.model,
     max_tokens: req.max_tokens,
+    ...(req.system ? { system: req.system } : {}),
     messages:   req.messages,
   })
   return { content: response.content.map(c => ({ text: (c as any).text || '' })) }
 }
 
-/** Shared by both 'openai' and 'openai_compatible' — same request/response shape, only the base URL differs. */
+/** Shared by both 'openai' and 'openai_compatible' — same request/response shape, only the base URL differs. OpenAI's format has no separate system parameter; it's just another message with role "system", conventionally first. */
 async function callOpenAIShape(req: ChatCompletionRequest, config: LLMProviderConfig, baseUrl: string): Promise<ChatCompletionResponse> {
+  const messages = req.system
+    ? [{ role: 'system', content: req.system }, ...req.messages]
+    : req.messages
+
   const res = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
     method:  'POST',
     headers: {
@@ -191,7 +205,7 @@ async function callOpenAIShape(req: ChatCompletionRequest, config: LLMProviderCo
     body: JSON.stringify({
       model:      config.model,
       max_tokens: req.max_tokens,
-      messages:   req.messages,
+      messages,
     }),
   })
 
@@ -208,7 +222,7 @@ async function callOpenAIShape(req: ChatCompletionRequest, config: LLMProviderCo
 async function callGoogle(req: ChatCompletionRequest, config: LLMProviderConfig): Promise<ChatCompletionResponse> {
   // Current documented shape (verified against ai.google.dev, not assumed):
   // POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
-  // header x-goog-api-key, body { contents: [{ role, parts: [{ text }] }], generationConfig: { maxOutputTokens } }
+  // header x-goog-api-key, body { systemInstruction?, contents: [{ role, parts: [{ text }] }], generationConfig: { maxOutputTokens } }
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent`
 
   const res = await fetch(url, {
@@ -218,6 +232,7 @@ async function callGoogle(req: ChatCompletionRequest, config: LLMProviderConfig)
       'x-goog-api-key': config.apiKey,
     },
     body: JSON.stringify({
+      ...(req.system ? { systemInstruction: { parts: [{ text: req.system }] } } : {}),
       contents: req.messages.map(m => ({
         role:  m.role === 'user' ? 'user' : 'model',
         parts: [{ text: m.content }],

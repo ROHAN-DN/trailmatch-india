@@ -479,11 +479,18 @@ structuredCriteria array for it — do not omit the trial from the response enti
 }
 
 // ── Claude AI matching ────────────────────────────────────────
-async function scoreWithClaude(patient: Patient, trials: RawTrial[], sourceStatus: SourceStatus, clinicalData: ClinicalData | null, cacheStore?: TrialCriteriaCacheStore): Promise<MatchResult> {
-  // Resolved once per match run (not once per call) so both Claude calls
-  // below use the same provider/model, and so an org's provider config
-  // is only read from the DB once per run, not twice.
-  const llmConfig = await resolveLLMConfig(patient.org_id)
+async function scoreWithClaude(patient: Patient, trials: RawTrial[], sourceStatus: SourceStatus, clinicalData: ClinicalData | null, cacheStore?: TrialCriteriaCacheStore, providedLlmConfig?: LLMProviderConfig): Promise<MatchResult> {
+  // Resolved once per match run if not already provided by the caller.
+  // REAL INEFFICIENCY FOUND AND FIXED HERE (caught in review): batch
+  // matching (pages/api/match/index.ts) calls matchPatient once per
+  // patient, all from the same org — without this optional parameter,
+  // that meant one redundant DB round-trip AND one redundant AES
+  // decrypt per patient just to answer a question with the same answer
+  // for the whole batch. The batch caller now resolves this once,
+  // upfront, and passes it through every patient in the batch. Callers
+  // that don't pre-resolve (e.g. a single ad-hoc match) still get
+  // correct behavior — it's just resolved here instead.
+  const llmConfig = providedLlmConfig ?? await resolveLLMConfig(patient.org_id)
 
   const ctgovCount = trials.filter(t => t.source === 'ClinicalTrials.gov').length
   const ctriCount  = trials.filter(t => t.source === 'CTRI').length
@@ -831,7 +838,8 @@ async function enrichClinicalData(clinicalData: ClinicalData | null): Promise<Cl
 export async function matchPatient(
   patient: Patient,
   clinicalData: ClinicalData | null = null,
-  cacheStore?: TrialCriteriaCacheStore
+  cacheStore?: TrialCriteriaCacheStore,
+  llmConfig?: LLMProviderConfig
 ): Promise<MatchResult> {
   const [ctOutcome, ctriOutcome, enrichedClinicalData] = await Promise.all([
     fetchCTgov(patient.diagnosis),
@@ -847,7 +855,7 @@ export async function matchPatient(
   }
 
   const allTrials = [...ctOutcome.trials, ...ctriOutcome.trials]
-  const result = await scoreWithClaude(patient, allTrials, sourceStatus, enrichedClinicalData, cacheStore)
+  const result = await scoreWithClaude(patient, allTrials, sourceStatus, enrichedClinicalData, cacheStore, llmConfig)
 
   // If exactly one source failed but the other returned usable trials, the
   // result is real but incomplete. Prepend a deterministic, code-authored

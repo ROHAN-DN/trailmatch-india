@@ -98,7 +98,7 @@ export default withApiHandler(
       // AI parse if raw_text provided
       if (body.raw_text && body.parse_with_ai !== false) {
         try {
-          const aiResult = await parseProtocol(body.raw_text)
+          const aiResult = await parseProtocol(body.raw_text, org.id)
           if (aiResult.inclusion_criteria.length > 0 || aiResult.exclusion_criteria.length > 0) {
             inclusion_criteria = aiResult.inclusion_criteria
             exclusion_criteria = aiResult.exclusion_criteria
@@ -160,7 +160,7 @@ export default withApiHandler(
 
       if (body.raw_text && body.reparse) {
         try {
-          const aiResult = await parseProtocol(body.raw_text)
+          const aiResult = await parseProtocol(body.raw_text, org.id)
           if (aiResult.inclusion_criteria.length > 0) {
             update.inclusion_criteria = aiResult.inclusion_criteria
             update.exclusion_criteria = aiResult.exclusion_criteria

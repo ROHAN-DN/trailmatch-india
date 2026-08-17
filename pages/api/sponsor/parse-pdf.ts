@@ -17,6 +17,7 @@
 import { z } from 'zod'
 import Anthropic from '@anthropic-ai/sdk'
 import { withApiHandler } from '../../../lib/api-handler'
+import { resolveLLMConfig } from '../../../lib/llm-provider'
 import { sanitiseCodes, sanitiseCriteria, validatePhase } from '../../../lib/protocol-parser'
 import { ForbiddenError, ValidationError, AIServiceError } from '../../../lib/errors'
 import { writeAudit } from '../../../lib/audit'
@@ -72,12 +73,32 @@ export default withApiHandler(async (req, res, ctx) => {
   }
 
   const { pdf_base64 } = body.data
-  const client = new Anthropic()
+
+  // This route sends the PDF directly to Claude as a native "document"
+  // content block — Anthropic-specific, and not something that maps
+  // cleanly onto other providers (OpenAI and Google each have their own,
+  // different file-handling conventions that would need real, separately
+  // -verified implementations, not a rushed guess). Rather than silently
+  // ignore an org's configured non-Anthropic provider and use Claude
+  // anyway — which would defeat the entire point of letting orgs choose
+  // — this respects the org's choice honestly: use their own Anthropic
+  // key if that's what they've configured, fall back to the platform
+  // default (also Anthropic, unless overridden) if they haven't
+  // configured anything, and give a clear, honest error for any other
+  // provider rather than a confusing failure or a silent wrong-vendor call.
+  const llmConfig = await resolveLLMConfig(org.id)
+  if (llmConfig.provider !== 'anthropic') {
+    throw new AIServiceError(
+      `Direct PDF protocol parsing currently requires Anthropic (this org is configured to use ${llmConfig.provider}). ` +
+      `Paste the protocol text instead — that path supports any configured provider — or switch this org back to Anthropic in Settings for PDF upload specifically.`
+    )
+  }
+  const client = new Anthropic({ apiKey: llmConfig.apiKey })
 
   let parsed: any
   try {
     const response = await client.messages.create({
-      model:      'claude-sonnet-4-6',
+      model:      llmConfig.model,
       max_tokens: 2000,
       system:     SYSTEM_PROMPT,
       messages:   [{

@@ -10,7 +10,7 @@
  *   - Indian clinical context baked into prompt (Aadhaar, ABHA, travel within city)
  */
 
-import Anthropic from '@anthropic-ai/sdk'
+import { createChatCompletion, resolveLLMConfig } from './llm-provider'
 import type { ChecklistItem, ChecklistCategory } from './types/domain'
 
 export type { ChecklistItem, ChecklistCategory }
@@ -67,8 +67,8 @@ IMPORTANT RULES:
 - Use Indian context: mention "city hospital", "nearest CTRI-registered site", ABHA app
 - Confidence should reflect how specific the item is to this patient's profile vs generic advice`
 
-export async function generateChecklist(input: PreScreeningInput): Promise<ChecklistItem[]> {
-  const client = new Anthropic()
+export async function generateChecklist(input: PreScreeningInput, orgId?: string): Promise<ChecklistItem[]> {
+  const llmConfig = await resolveLLMConfig(orgId)
 
   const userPrompt = `Generate a pre-screening checklist for this patient and trial.
 
@@ -93,16 +93,14 @@ TRIAL:
   // Up to 2 attempts for malformed responses
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const response = await client.messages.create({
-        model:      'claude-sonnet-4-6',
+      const response = await createChatCompletion({
         max_tokens: 1500,
         system:     SYSTEM_PROMPT,
         messages:   [{ role:'user', content: userPrompt }],
-      })
+      }, llmConfig)
 
       const raw = response.content
-        .filter(b => b.type === 'text')
-        .map(b => (b as any).text)
+        .map(b => b.text || '')
         .join('')
         .replace(/```json|```/g, '')
         .trim()

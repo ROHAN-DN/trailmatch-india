@@ -29,7 +29,7 @@ describe('resolveLLMConfig — per-org config with platform-default fallback', (
     expect(config).toEqual({
       provider: 'anthropic',
       apiKey:   'sk-ant-real-key',
-      model:    'claude-sonnet-4-20250514',
+      model:    'claude-sonnet-5',
     })
   })
 
@@ -145,7 +145,7 @@ describe('createChatCompletion — provider dispatch', () => {
     // REST-based providers) is never touched on this path, not that the
     // real Anthropic call succeeds.
     const fetchSpy = vi.spyOn(global, 'fetch')
-    const config: LLMProviderConfig = { provider: 'anthropic', apiKey: 'fake', model: 'claude-sonnet-4-20250514' }
+    const config: LLMProviderConfig = { provider: 'anthropic', apiKey: 'fake', model: 'claude-sonnet-5' }
 
     await expect(
       createChatCompletion({ max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] }, config)
@@ -221,5 +221,38 @@ describe('createChatCompletion — provider dispatch', () => {
     await expect(
       createChatCompletion({ max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] }, config)
     ).rejects.toThrow(/429/)
+  })
+
+  it('threads a system prompt correctly for Anthropic — top-level system param, doesn\'t break routing', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch')
+    const config: LLMProviderConfig = { provider: 'anthropic', apiKey: 'fake', model: 'claude-sonnet-5' }
+    await expect(
+      createChatCompletion({ max_tokens: 10, system: 'You are a helpful assistant.', messages: [{ role: 'user', content: 'hi' }] }, config)
+    ).rejects.toBeTruthy()
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('threads a system prompt correctly for OpenAI-shaped providers — prepended as a role:"system" message', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true, json: async () => ({ choices: [{ message: { content: 'ok' } }] }),
+    } as Response)
+    const config: LLMProviderConfig = { provider: 'openai', apiKey: 'sk-test', model: 'gpt-4o-mini' }
+    await createChatCompletion({ max_tokens: 10, system: 'You are a helpful assistant.', messages: [{ role: 'user', content: 'hi' }] }, config)
+
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.messages[0]).toEqual({ role: 'system', content: 'You are a helpful assistant.' })
+    expect(body.messages[1]).toEqual({ role: 'user', content: 'hi' })
+  })
+
+  it('threads a system prompt correctly for Google — top-level systemInstruction field, separate from contents', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] }),
+    } as Response)
+    const config: LLMProviderConfig = { provider: 'google', apiKey: 'test-key', model: 'gemini-2.0-flash' }
+    await createChatCompletion({ max_tokens: 10, system: 'You are a helpful assistant.', messages: [{ role: 'user', content: 'hi' }] }, config)
+
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.systemInstruction).toEqual({ parts: [{ text: 'You are a helpful assistant.' }] })
+    expect(body.contents[0].parts[0].text).toBe('hi')
   })
 })

@@ -12,6 +12,7 @@ import { sendMatchReport } from './email'
 import { notifyNewTrials, notifyBatchComplete } from './whatsapp'
 import { supabaseAdmin } from './supabase'
 import { createSupabaseTrialCriteriaCacheStore } from './trial-criteria-cache'
+import { resolveLLMConfig, type LLMProviderConfig } from './llm-provider'
 
 export interface RematchSummary {
   patientId:    string
@@ -38,8 +39,9 @@ export function findNewTrials(
 
 // ── Re-match a single patient ─────────────────────────────────
 export async function rematchPatient(
-  patient: Patient & { id: string; org_id?: string },
-  previousMatches: TrialMatch[]
+  patient: Patient & { id: string },
+  previousMatches: TrialMatch[],
+  llmConfig?: LLMProviderConfig
 ): Promise<RematchSummary> {
   let clinicalData = null
   if (patient.org_id) {
@@ -47,7 +49,7 @@ export async function rematchPatient(
     if (!('error' in clinical)) clinicalData = clinical
   }
   const trialCriteriaCache = createSupabaseTrialCriteriaCacheStore(supabaseAdmin())
-  const result    = await matchPatient(patient, clinicalData, trialCriteriaCache)
+  const result    = await matchPatient(patient, clinicalData, trialCriteriaCache, llmConfig)
   const newTrials = findNewTrials(previousMatches, result.matches)
 
   return {
@@ -90,6 +92,14 @@ export async function runScheduledRematch() {
   let processed   = 0
   let withNewTrials = 0
   const orgSummaries: Record<string, { strongTotal: number; partialTotal: number; failed: number; patients: number }> = {}
+  // This loop spans many different orgs in one run (unlike the per-org
+  // batch matcher in pages/api/match/index.ts, where a single upfront
+  // resolve is correct) — a naive single pre-resolve would be wrong
+  // here. But orgs with more than one patient due for re-match in the
+  // same run would still redundantly re-fetch their own config once per
+  // patient without this — cache per org_id instead, resolved lazily on
+  // first encounter within this run.
+  const llmConfigCache = new Map<string, LLMProviderConfig>()
 
   for (const patient of patients) {
     try {
@@ -115,7 +125,13 @@ export async function runScheduledRematch() {
       const previousMatches: TrialMatch[] = lastResult?.matches || []
 
       // Run fresh match
-      const summary = await rematchPatient(patient as any, previousMatches)
+      const patientOrgId = (patient as any).org_id as string | undefined
+      let llmConfig = patientOrgId ? llmConfigCache.get(patientOrgId) : undefined
+      if (!llmConfig) {
+        llmConfig = await resolveLLMConfig(patientOrgId)
+        if (patientOrgId) llmConfigCache.set(patientOrgId, llmConfig)
+      }
+      const summary = await rematchPatient(patient as any, previousMatches, llmConfig)
       processed++
 
       // Org stats

@@ -9,7 +9,7 @@
  *  - Handles both text paste and pre-extracted PDF text
  */
 
-import Anthropic from '@anthropic-ai/sdk'
+import { createChatCompletion, resolveLLMConfig } from './llm-provider'
 import type { FeasibilityCriterion, MappedCodes, ProtocolPhase } from './types/domain'
 
 export interface ParsedProtocol {
@@ -61,26 +61,24 @@ RULES:
 - Maximum 8 inclusion criteria, 6 exclusion criteria — prioritise the most discriminating ones
 - parse_confidence: 0.9+ = full protocol text; 0.6-0.9 = partial/summary; below 0.6 = very sparse input`
 
-export async function parseProtocol(rawText: string): Promise<ParsedProtocol> {
+export async function parseProtocol(rawText: string, orgId?: string): Promise<ParsedProtocol> {
   if (!rawText?.trim() || rawText.trim().length < 50) {
     return emptyProtocol('Input text too short to parse.')
   }
 
-  const client  = new Anthropic()
+  const llmConfig = await resolveLLMConfig(orgId)
   const trimmed = rawText.slice(0, 12_000)   // ~3k tokens — enough for any protocol section
 
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const response = await client.messages.create({
-        model:      'claude-sonnet-4-6',
+      const response = await createChatCompletion({
         max_tokens: 2000,
         system:     SYSTEM_PROMPT,
         messages:   [{ role:'user', content: `Parse this clinical trial protocol:\n\n${trimmed}` }],
-      })
+      }, llmConfig)
 
       const raw = response.content
-        .filter(b => b.type === 'text')
-        .map(b => (b as any).text)
+        .map(b => b.text || '')
         .join('')
         .replace(/```json|```/g, '')
         .trim()

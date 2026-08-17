@@ -132,7 +132,7 @@ export default withApiHandler(async (req, res, ctx) => {
         criteria_summary: criteriaSummary,
         india_sites:      targetMatch.indiaSites || '',
       },
-    })
+    }, org.id)
   } catch (e: any) {
     throw new DatabaseError('generate checklist', e.message)
   }

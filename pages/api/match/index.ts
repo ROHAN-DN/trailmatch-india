@@ -7,6 +7,7 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '../auth/[...nextauth]'
 import { supabaseAdmin } from '../../../lib/supabase'
 import { matchPatient } from '../../../lib/matcher'
+import { resolveLLMConfig } from '../../../lib/llm-provider'
 import { createSupabaseTrialCriteriaCacheStore } from '../../../lib/trial-criteria-cache'
 import { readStructuredClinicalData } from '../../../lib/clinical-data'
 import { generateReportPDF } from '../../../lib/pdf'
@@ -53,6 +54,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const db   = supabaseAdmin()
   const org_id = user.org_id
   const trialCriteriaCache = createSupabaseTrialCriteriaCacheStore(db)
+  // Resolved once for the whole batch — every patient here belongs to
+  // this same org, so this answers the same question N times otherwise.
+  // See scoreWithClaude's comment in lib/matcher.ts for the full story.
+  const llmConfig = await resolveLLMConfig(org_id)
 
   const { patient_ids, send_email = false, email_to } = req.body as {
     patient_ids: string[]; send_email?: boolean; email_to?: string
@@ -108,7 +113,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const clinicalData = 'error' in clinical ? null : clinical
       if ('error' in clinical) console.warn(`[match] Could not load structured clinical data for ${patient.id}, proceeding without deterministic evaluation:`, clinical.error)
 
-      const result    = await matchPatient(patient, clinicalData, trialCriteriaCache)
+      const result    = await matchPatient(patient, clinicalData, trialCriteriaCache, llmConfig)
       const pdfBuffer = generateReportPDF(patient, result)
       const fileName  = `${org_id}/${job!.id}/${patient.patient_code}.pdf`
 

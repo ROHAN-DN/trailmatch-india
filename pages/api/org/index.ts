@@ -80,10 +80,29 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         if (provider === 'openai_compatible' && !req.body.llm_base_url) {
           return res.status(400).json({ error: 'llm_base_url is required when llm_provider is "openai_compatible"' })
         }
-        // A new key is only ever provided when the admin is actually
-        // setting/rotating one — leaving the field blank in the UI on
-        // a subsequent save (e.g. just changing the model name) must
-        // not silently wipe out an already-configured key.
+
+        // REAL BUG FOUND AND FIXED HERE (caught in review, not by a user
+        // report): "leave the key blank to keep the current one" is only
+        // ever safe when the provider ISN'T changing. Without this check,
+        // switching from OpenAI to Google with the key field left blank
+        // (which the UI's own placeholder text invites) would silently
+        // store the update as llm_provider='google' while leaving the
+        // OpenAI-format key in llm_api_key_encrypted untouched — the
+        // settings page would then show "Currently using Google" while
+        // every real match attempt fails against a key that was never
+        // valid for Google's API. This can't be caught by the browser's
+        // `required` attribute alone (that's client-side only, and was
+        // exactly the gap here), so it's enforced server-side.
+        const { data: existingOrg } = await db.from('organizations')
+          .select('llm_provider')
+          .eq('id', user.org_id)
+          .single()
+        const isProviderChanging = existingOrg?.llm_provider !== provider
+
+        if (isProviderChanging && !req.body.llm_api_key) {
+          return res.status(400).json({ error: `Switching from ${existingOrg?.llm_provider || 'the platform default'} to ${provider} requires a new API key for ${provider} — the previous key can't be reused across providers.` })
+        }
+
         if (req.body.llm_api_key) {
           const keyEnv = process.env.LLM_CREDENTIAL_ENCRYPTION_KEY
           if (!keyEnv) {

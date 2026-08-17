@@ -21,21 +21,33 @@ const PROVIDER_LABELS: Record<string, string> = {
 }
 
 const PROVIDER_MODEL_HINTS: Record<string, string> = {
-  anthropic:         'e.g. claude-sonnet-4-20250514 — leave blank to use the platform default',
+  anthropic:         'e.g. claude-sonnet-5 — leave blank to use the platform default',
   openai:            'e.g. gpt-4o — leave blank to use the platform default',
   google:            'e.g. gemini-2.0-flash — leave blank to use the platform default',
   openai_compatible: 'the exact model id your endpoint expects — required',
 }
 
 export default function AIProviderSettingsCard({ org, brandColor, onSave }: Props) {
-  const [provider, setProvider] = useState<string>(org?.llm_provider || '')
+  const originalProvider = org?.llm_provider || ''
+  const [provider, setProvider] = useState<string>(originalProvider)
   const [apiKey,   setApiKey]   = useState('')
   const [model,    setModel]    = useState(org?.llm_model || '')
   const [baseUrl,  setBaseUrl]  = useState(org?.llm_base_url || '')
   const [msg,      setMsg]      = useState('')
   const [busy,     setBusy]     = useState(false)
 
-  const isConfigured = !!org?.llm_provider
+  const isConfigured = !!org?.llm_api_key_configured
+  // REAL BUG FOUND AND FIXED HERE: a key from one provider can never be
+  // reused for a different one, so "leave blank to keep the current
+  // key" is only actually true when the selected provider matches what
+  // was already configured. Switching providers must require a fresh
+  // key — otherwise this form would happily save "now using Google"
+  // while silently leaving an OpenAI-shaped key in storage, which the
+  // settings page would then misreport as configured right up until a
+  // real match attempt fails against it. Enforced server-side too
+  // (pages/api/org/index.ts) — this UI check is just the fast path that
+  // stops the confusing state from being reachable in the first place.
+  const keyBlankIsSafe = isConfigured && provider === originalProvider
   const btnStyle = { padding:'9px 20px', background: brandColor, color:'#fff', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'500', cursor:'pointer', fontFamily:'sans-serif' } as any
   const btnGhost = { ...btnStyle, background:'transparent', color:'#72706A', border:'1px solid #E2E0D8' } as any
 
@@ -94,14 +106,17 @@ export default function AIProviderSettingsCard({ org, brandColor, onSave }: Prop
         {provider && (
           <div style={S.row}>
             <div>
-              <label style={S.label}>API key {isConfigured && <span style={{ fontWeight:'400', textTransform:'none' }}>(leave blank to keep the current one)</span>}</label>
+              <label style={S.label}>
+                API key {keyBlankIsSafe && <span style={{ fontWeight:'400', textTransform:'none' }}>(leave blank to keep the current one)</span>}
+                {provider && provider !== originalProvider && originalProvider && <span style={{ fontWeight:'400', textTransform:'none', color:'#A32D2D' }}> — required: switching from {PROVIDER_LABELS[originalProvider] || originalProvider}, the previous key can't carry over</span>}
+              </label>
               <input
                 style={S.input}
                 type="password"
                 value={apiKey}
                 onChange={e => setApiKey(e.target.value)}
-                placeholder={isConfigured ? '••••••••••••••••' : 'Paste your API key'}
-                required={!isConfigured}
+                placeholder={keyBlankIsSafe ? '••••••••••••••••' : 'Paste your API key'}
+                required={!keyBlankIsSafe}
                 autoComplete="off"
               />
             </div>
