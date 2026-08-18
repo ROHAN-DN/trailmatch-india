@@ -123,6 +123,25 @@ key and a compromised MFA secret should never share a blast radius:
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
+**Coverage — every real Claude call site in this app, not just the
+matching engine.** The first multi-provider pass only covered
+`lib/matcher.ts` and missed three other independent, hardcoded
+`new Anthropic()` clients — protocol parsing, prescreening checklists,
+and PDF protocol upload. All four now go through the same
+provider-agnostic path. PDF upload specifically used to send the file
+directly to Claude as a native "document" block — Anthropic-specific,
+with no clean equivalent across OpenAI/Google/openai_compatible. Fixed
+by extracting text from the PDF first (`lib/pdf-text-extract.ts`, using
+`pdfjs-dist` — deliberately not the newer `pdf-parse@2.x`, which bundles
+a native canvas binary as a hard dependency, a real risk for Vercel's
+serverless functions), then feeding that text through the same
+provider-agnostic `parseProtocol()` pipeline pasted-text protocols
+already use. Real, stated trade-off: Claude's native PDF reading can use
+visual/layout understanding (tables, multi-column text) that plain text
+extraction loses — for a typical prose-heavy protocol this is unlikely
+to matter, for one that's primarily a complex table it may not extract
+as well as Claude reading the PDF directly would have.
+
 **Resend (email)**
 1. Go to https://resend.com → free account
 2. API Keys → Create API Key
