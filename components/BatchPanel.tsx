@@ -7,6 +7,32 @@ import MatchExplainability from './MatchExplainability'
 // Enrollment statuses where pre-screening prep is relevant
 const PRESCREENING_ELIGIBLE = ['pi_contacted', 'screened', 'enrolled', 'screen_failed']
 
+/**
+ * A raw provider error is genuinely useful for diagnosis, but this app's
+ * audience is clinical coordinators, not engineers — a short, friendly
+ * hint above the raw text turns "openai request failed: 401
+ * Unauthorized" into something actually actionable without hiding the
+ * real error underneath it.
+ *
+ * Pure logic, exported and tested directly (no JSX/React dependency) —
+ * same pattern as MatchExplainability.tsx's interpretedOnlyEntries, for
+ * the same reason: this project has no React component-testing setup,
+ * so pure logic gets pulled out and tested in the same node environment
+ * as everything else, rather than skipped.
+ */
+export function friendlyErrorHint(errorMsg: string): string | null {
+  if (/\b401\b|unauthorized|invalid.*api.*key|api.*key.*invalid/i.test(errorMsg)) {
+    return 'This looks like an AI provider authentication problem — check the API key in Settings → AI provider.'
+  }
+  if (/\b429\b|rate.?limit/i.test(errorMsg)) {
+    return 'The configured AI provider rate-limited this request — this is common on free tiers. Wait a bit and try again, or check your provider\'s usage limits.'
+  }
+  if (/openai_compatible.*baseUrl|baseUrl.*required/i.test(errorMsg)) {
+    return 'The AI provider is missing its base URL — check Settings → AI provider.'
+  }
+  return null
+}
+
 interface Props { brandColor: string }
 
 export default function BatchPanel({ brandColor }: Props) {
@@ -86,6 +112,13 @@ export default function BatchPanel({ brandColor }: Props) {
       running:   ['#E1F5EE', '#0F6E56'],
       completed: ['#EAF3DE', '#27500A'],
       failed:    ['#FEF0EE', '#A32D2D'],
+      // REAL BUG FOUND AND FIXED HERE: match_results rows use
+      // 'pending'/'running'/'done'/'error' (not the job-level
+      // 'completed'/'failed' this map was originally written for).
+      // Without an entry, 'error' fell through to the neutral default
+      // below — a failed match displayed as a plain gray badge instead
+      // of the alarming red one a real failure deserves.
+      error:     ['#FEF0EE', '#A32D2D'],
     }
     const [bg, color] = map[status] || ['#F7F6F2', '#72706A']
     return <span style={{ background:bg, color, fontSize:'10px', fontWeight:'600', padding:'2px 9px', borderRadius:'99px', letterSpacing:'.05em', textTransform:'uppercase' }}>{status}</span>
@@ -169,13 +202,38 @@ export default function BatchPanel({ brandColor }: Props) {
                       : '—'}
                   </div>
                   <div>
-                    {r.status === 'done' && r.matches && (
+                    {(r.status === 'done' && r.matches) || r.status === 'error' ? (
                       <button style={S.btn(true)} onClick={() => setExpandedId(prev => prev === r.id ? null : r.id)}>
-                        {expandedId === r.id ? 'Hide' : 'View'}
+                        {expandedId === r.id ? 'Hide' : (r.status === 'error' ? 'Why?' : 'View')}
                       </button>
-                    )}
+                    ) : null}
                   </div>
                 </div>
+
+                {/* Real gap found and fixed here: error_msg was already being
+                    sent by the API (pages/api/match/[id].ts already selects
+                    it) but never rendered anywhere — a failed match gave the
+                    coordinator zero visibility into why, which matters a lot
+                    more now that a misconfigured org-level AI provider key is
+                    a real, self-inflicted failure mode a coordinator (not
+                    just the platform operator) can cause. */}
+                {expandedId === r.id && r.status === 'error' && (
+                  <div style={{ padding:'0 14px 14px', borderBottom:'1px solid #E2E0D8', background:'#FBFAF7' }}>
+                    <div style={{ fontSize:'12.5px', color:'#A32D2D', padding:'10px 0' }}>
+                      {(() => {
+                        const hint = friendlyErrorHint(r.error_msg || '')
+                        return (
+                          <>
+                            {hint && <div style={{ fontWeight:'500', marginBottom:'6px' }}>{hint}</div>}
+                            <div style={{ color:'#72706A', fontFamily:'monospace', fontSize:'11.5px', wordBreak:'break-word' }}>
+                              {r.error_msg || 'No error detail was recorded for this match.'}
+                            </div>
+                          </>
+                        )
+                      })()}
+                    </div>
+                  </div>
+                )}
 
                 {/* Expanded detail: summary + explainable match breakdown + site profile link + PI card + pre-screening checklist */}
                 {expandedId === r.id && r.status === 'done' && (
