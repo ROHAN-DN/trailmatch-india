@@ -107,7 +107,7 @@ if (fs.existsSync(gi) && fs.readFileSync(gi, 'utf-8').includes('.env.local')) {
 
 // 5. Rate limiting
 console.log('5. Checking rate limiting on sensitive routes...')
-const routes = ['pages/api/match/index.ts', 'pages/api/patients/index.ts', 'pages/api/abdm/initiate.ts']
+const routes = ['pages/api/match/index.ts', 'pages/api/patients/index.ts', 'pages/api/abdm/initiate.ts', 'pages/api/org/test-llm-provider.ts']
 let missing = 0
 for (const r of routes) {
   const fp = path.join(root, r)

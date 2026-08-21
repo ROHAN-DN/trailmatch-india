@@ -65,7 +65,7 @@ interface ChatCompletionResponse {
   content: { text: string }[]
 }
 
-function defaultModelFor(provider: LLMProviderName): string {
+export function defaultModelFor(provider: LLMProviderName): string {
   switch (provider) {
     // REAL BUG FOUND AND FIXED HERE (caught in review, not a user report):
     // this previously defaulted to 'claude-sonnet-4-20250514' — the exact
@@ -121,6 +121,79 @@ export async function resolveLLMConfig(orgId: string | null | undefined): Promis
     }
   }
   return getPlatformDefaultConfig()
+}
+
+/**
+ * The single source of truth for "does this provider-config operation
+ * require a newly-provided API key, or can it reuse what's already
+ * stored?" Shared between pages/api/org/index.ts (PATCH — never needs
+ * the actual decrypted key when reusing; it just leaves the stored
+ * ciphertext untouched) and pages/api/org/test-llm-provider.ts (test —
+ * always needs the real plaintext key to make an actual call, via
+ * resolveEffectiveApiKey below, which uses this same check internally).
+ * One rule, expressed once — the exact class of duplication risk that's
+ * already caused a real bug once in this codebase (the provider-switch
+ * key-reuse bug PATCH's own comment documents).
+ */
+async function checkKeyRequirement(
+  orgId: string,
+  requestedProvider: LLMProviderName
+): Promise<{ required: boolean; currentProvider: string | null; currentEncryptedKey: string | null }> {
+  const { data: existingOrg } = await supabaseAdmin()
+    .from('organizations')
+    .select('llm_provider, llm_api_key_encrypted')
+    .eq('id', orgId)
+    .single()
+
+  const currentProvider = existingOrg?.llm_provider ?? null
+  return {
+    required: currentProvider !== requestedProvider,
+    currentProvider,
+    currentEncryptedKey: existingOrg?.llm_api_key_encrypted ?? null,
+  }
+}
+
+/**
+ * Determines which API key to actually use for a provider-config
+ * operation — saving via PATCH, or testing a connection before saving.
+ * See checkKeyRequirement above for the shared rule this builds on.
+ */
+export async function resolveEffectiveApiKey(
+  orgId: string,
+  requestedProvider: LLMProviderName,
+  providedApiKey: string | undefined
+): Promise<{ apiKey: string } | { error: string }> {
+  if (providedApiKey) return { apiKey: providedApiKey }
+
+  const { required, currentProvider, currentEncryptedKey } = await checkKeyRequirement(orgId, requestedProvider)
+
+  if (required) {
+    return { error: `Switching from ${currentProvider || 'the platform default'} to ${requestedProvider} requires a new API key for ${requestedProvider} — the previous key can't be reused across providers.` }
+  }
+  if (!currentEncryptedKey) {
+    return { error: `No API key is configured yet for ${requestedProvider} — provide one.` }
+  }
+
+  const keyEnv = process.env.LLM_CREDENTIAL_ENCRYPTION_KEY
+  if (!keyEnv) {
+    return { error: 'Server is not configured to store AI provider credentials (LLM_CREDENTIAL_ENCRYPTION_KEY is not set). Contact your administrator.' }
+  }
+
+  try {
+    const apiKey = decrypt(currentEncryptedKey, parseEncryptionKey(keyEnv, 'LLM_CREDENTIAL_ENCRYPTION_KEY'))
+    return { apiKey }
+  } catch (err: any) {
+    return { error: `Could not decrypt the stored API key: ${err?.message || 'unknown error'}. This can happen if LLM_CREDENTIAL_ENCRYPTION_KEY changed since the key was saved — re-enter the key.` }
+  }
+}
+
+/**
+ * Lightweight version for PATCH, which never needs the decrypted key
+ * itself when reusing one — only whether a new one must be supplied.
+ */
+export async function isNewApiKeyRequired(orgId: string, requestedProvider: LLMProviderName): Promise<{ required: boolean; currentProvider: string | null }> {
+  const { required, currentProvider } = await checkKeyRequirement(orgId, requestedProvider)
+  return { required, currentProvider }
 }
 
 function getPlatformDefaultConfig(): LLMProviderConfig {

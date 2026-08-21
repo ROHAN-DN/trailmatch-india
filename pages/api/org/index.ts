@@ -3,7 +3,7 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '../auth/[...nextauth]'
 import { supabaseAdmin } from '../../../lib/supabase'
 import { encrypt, decrypt, parseEncryptionKey } from '../../../lib/encryption'
-import { LLM_PROVIDER_NAMES, type LLMProviderName } from '../../../lib/llm-provider'
+import { LLM_PROVIDER_NAMES, isNewApiKeyRequired, type LLMProviderName } from '../../../lib/llm-provider'
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const session = await getServerSession(req, res, authOptions)
@@ -93,14 +93,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         // valid for Google's API. This can't be caught by the browser's
         // `required` attribute alone (that's client-side only, and was
         // exactly the gap here), so it's enforced server-side.
-        const { data: existingOrg } = await db.from('organizations')
-          .select('llm_provider')
-          .eq('id', user.org_id)
-          .single()
-        const isProviderChanging = existingOrg?.llm_provider !== provider
-
-        if (isProviderChanging && !req.body.llm_api_key) {
-          return res.status(400).json({ error: `Switching from ${existingOrg?.llm_provider || 'the platform default'} to ${provider} requires a new API key for ${provider} — the previous key can't be reused across providers.` })
+        //
+        // The actual "is a new key required" rule now lives in exactly
+        // one place (lib/llm-provider.ts's checkKeyRequirement), shared
+        // with pages/api/org/test-llm-provider.ts — this route doesn't
+        // duplicate the check anymore, so the two can't drift apart.
+        if (!req.body.llm_api_key) {
+          const { required, currentProvider } = await isNewApiKeyRequired(user.org_id, provider)
+          if (required) {
+            return res.status(400).json({ error: `Switching from ${currentProvider || 'the platform default'} to ${provider} requires a new API key for ${provider} — the previous key can't be reused across providers.` })
+          }
         }
 
         if (req.body.llm_api_key) {

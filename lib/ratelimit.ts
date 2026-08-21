@@ -59,3 +59,4 @@ export const abdmRateLimit        = (userId: string) => rateLimit(`abdm:${userId
 export const patientRateLimit     = (orgId: string)  => rateLimit(`patient:${orgId}`,     50, 60_000)
 export const authRateLimit        = (ip: string)     => rateLimit(`auth:${ip}`,           10, 60 * 60_000)
 export const feasibilityRateLimit = (orgId: string)  => rateLimit(`feasibility:${orgId}`, 20, 60 * 60_000)
+export const llmTestRateLimit     = (orgId: string)  => rateLimit(`llm-test:${orgId}`,    10, 60_000)

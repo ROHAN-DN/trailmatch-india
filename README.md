@@ -98,7 +98,12 @@ model) via Settings → AI provider — different orgs sharing one
 deployment can each use a different vendor, encrypted at rest, same
 pattern as MFA secrets. An org that configures nothing falls back to
 the platform-wide default below, so the simplest path (one Anthropic
-key for the whole deployment) still works exactly as before:
+key for the whole deployment) still works exactly as before. A **Test
+connection** button in that settings card verifies a key actually works
+before saving it — makes one real, minimal call to the configured
+provider and reports success or a plain-language reason for failure, so
+a mistyped key is caught immediately instead of days later when the
+first real match fails.
 
 1. Go to https://console.anthropic.com
 2. API Keys → Create Key

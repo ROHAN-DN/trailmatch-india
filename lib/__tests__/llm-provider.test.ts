@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { createChatCompletion, resolveLLMConfig, type LLMProviderConfig } from '../llm-provider'
+import { createChatCompletion, resolveLLMConfig, resolveEffectiveApiKey, isNewApiKeyRequired, type LLMProviderConfig } from '../llm-provider'
 
 // resolveLLMConfig reads from Supabase — mock it so these are real unit
 // tests of the routing/fallback logic, not integration tests needing a
@@ -254,5 +254,93 @@ describe('createChatCompletion — provider dispatch', () => {
     const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string)
     expect(body.systemInstruction).toEqual({ parts: [{ text: 'You are a helpful assistant.' }] })
     expect(body.contents[0].parts[0].text).toBe('hi')
+  })
+})
+
+describe('isNewApiKeyRequired / resolveEffectiveApiKey — the shared rule behind pages/api/org/index.ts and pages/api/org/test-llm-provider.ts', () => {
+  const originalEnv = { ...process.env }
+
+  beforeEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  afterEach(() => {
+    process.env = { ...originalEnv }
+  })
+
+  function mockOrgLookup(data: { llm_provider: string | null; llm_api_key_encrypted: string | null }) {
+    ;(supabaseAdmin as any).mockReturnValue({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            single: async () => ({ data }),
+          }),
+        }),
+      }),
+    })
+  }
+
+  it('isNewApiKeyRequired: false when the requested provider matches what is already configured', async () => {
+    mockOrgLookup({ llm_provider: 'openai', llm_api_key_encrypted: 'anything' })
+    const result = await isNewApiKeyRequired('org-1', 'openai')
+    expect(result).toEqual({ required: false, currentProvider: 'openai' })
+  })
+
+  it('isNewApiKeyRequired: true when switching to a different provider than what is configured', async () => {
+    mockOrgLookup({ llm_provider: 'openai', llm_api_key_encrypted: 'anything' })
+    const result = await isNewApiKeyRequired('org-1', 'google')
+    expect(result).toEqual({ required: true, currentProvider: 'openai' })
+  })
+
+  it('isNewApiKeyRequired: true for a first-time configuration (nothing currently set)', async () => {
+    mockOrgLookup({ llm_provider: null, llm_api_key_encrypted: null })
+    const result = await isNewApiKeyRequired('org-1', 'anthropic')
+    expect(result).toEqual({ required: true, currentProvider: null })
+  })
+
+  it('resolveEffectiveApiKey: uses the provided key directly, without ever querying the database', async () => {
+    const lookupSpy = vi.fn()
+    ;(supabaseAdmin as any).mockImplementation(lookupSpy)
+
+    const result = await resolveEffectiveApiKey('org-1', 'openai', 'sk-freshly-provided')
+    expect(result).toEqual({ apiKey: 'sk-freshly-provided' })
+    expect(lookupSpy).not.toHaveBeenCalled()
+  })
+
+  it('resolveEffectiveApiKey: rejects with a clear error when switching providers and no key was given — this is the exact scenario that used to silently store the wrong key', async () => {
+    mockOrgLookup({ llm_provider: 'openai', llm_api_key_encrypted: 'stored-cipher' })
+    const result = await resolveEffectiveApiKey('org-1', 'google', undefined)
+    expect(result).toEqual({ error: expect.stringContaining('Switching from openai to google requires a new API key') })
+  })
+
+  it('resolveEffectiveApiKey: decrypts and returns the real stored key when reusing the same provider', async () => {
+    process.env.LLM_CREDENTIAL_ENCRYPTION_KEY = 'c'.repeat(64)
+    const { encrypt, parseEncryptionKey } = await import('../encryption')
+    const encrypted = encrypt('sk-real-stored-key', parseEncryptionKey('c'.repeat(64), 'test'))
+
+    mockOrgLookup({ llm_provider: 'openai', llm_api_key_encrypted: encrypted })
+    const result = await resolveEffectiveApiKey('org-1', 'openai', undefined)
+    expect(result).toEqual({ apiKey: 'sk-real-stored-key' })
+  })
+
+  it('resolveEffectiveApiKey: clear error when reusing is valid but nothing was ever actually stored', async () => {
+    mockOrgLookup({ llm_provider: 'openai', llm_api_key_encrypted: null })
+    const result = await resolveEffectiveApiKey('org-1', 'openai', undefined)
+    expect(result).toEqual({ error: expect.stringContaining('No API key is configured yet') })
+  })
+
+  it('resolveEffectiveApiKey: clear error when LLM_CREDENTIAL_ENCRYPTION_KEY is not configured server-side', async () => {
+    delete process.env.LLM_CREDENTIAL_ENCRYPTION_KEY
+    mockOrgLookup({ llm_provider: 'openai', llm_api_key_encrypted: 'some-cipher' })
+    const result = await resolveEffectiveApiKey('org-1', 'openai', undefined)
+    expect(result).toEqual({ error: expect.stringContaining('LLM_CREDENTIAL_ENCRYPTION_KEY is not set') })
+  })
+
+  it('resolveEffectiveApiKey: clear error (not a crash) if the stored ciphertext cannot actually be decrypted with the current key', async () => {
+    process.env.LLM_CREDENTIAL_ENCRYPTION_KEY = 'd'.repeat(64)
+    mockOrgLookup({ llm_provider: 'openai', llm_api_key_encrypted: 'not-valid-ciphertext-at-all' })
+    const result = await resolveEffectiveApiKey('org-1', 'openai', undefined)
+    expect('error' in result).toBe(true)
+    if ('error' in result) expect(result.error).toContain('Could not decrypt')
   })
 })

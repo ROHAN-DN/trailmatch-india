@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { friendlyErrorHint } from './BatchPanel'
 
 const S = {
   card:  { background:'#fff', border:'1px solid #E2E0D8', borderRadius:'10px', padding:'20px 22px', marginBottom:'14px' } as any,
@@ -35,6 +36,8 @@ export default function AIProviderSettingsCard({ org, brandColor, onSave }: Prop
   const [baseUrl,  setBaseUrl]  = useState(org?.llm_base_url || '')
   const [msg,      setMsg]      = useState('')
   const [busy,     setBusy]     = useState(false)
+  const [testBusy,   setTestBusy]   = useState(false)
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string; hint?: string | null } | null>(null)
 
   const isConfigured = !!org?.llm_api_key_configured
   // REAL BUG FOUND AND FIXED HERE: a key from one provider can never be
@@ -48,11 +51,41 @@ export default function AIProviderSettingsCard({ org, brandColor, onSave }: Prop
   // (pages/api/org/index.ts) — this UI check is just the fast path that
   // stops the confusing state from being reachable in the first place.
   const keyBlankIsSafe = isConfigured && provider === originalProvider
+  const hasUsableKey = !!apiKey || keyBlankIsSafe
+  const canTest = !!provider && hasUsableKey && (provider !== 'openai_compatible' || !!baseUrl)
   const btnStyle = { padding:'9px 20px', background: brandColor, color:'#fff', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'500', cursor:'pointer', fontFamily:'sans-serif' } as any
   const btnGhost = { ...btnStyle, background:'transparent', color:'#72706A', border:'1px solid #E2E0D8' } as any
 
+  async function testConnection() {
+    setTestBusy(true); setTestResult(null)
+    try {
+      const r = await fetch('/api/org/test-llm-provider', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider,
+          apiKey:  apiKey || undefined,   // omitted, not blank — lets the server reuse the stored key when safe
+          model:   model || undefined,
+          baseUrl: baseUrl || undefined,
+        }),
+      })
+      const data = await r.json()
+      if (!r.ok) {
+        // 400/401/403/429 from validation, auth, or rate limiting — not a provider-side failure
+        setTestResult({ success: false, message: data.error || `Request failed (${r.status}).` })
+      } else if (data.success) {
+        setTestResult({ success: true, message: `Connected successfully — ${data.model} responded.` })
+      } else {
+        setTestResult({ success: false, message: data.error || 'The provider rejected the request.', hint: friendlyErrorHint(data.error || '') })
+      }
+    } catch (e: any) {
+      setTestResult({ success: false, message: e?.message || 'Could not reach the test endpoint.' })
+    }
+    setTestBusy(false)
+  }
+
   async function save(e: React.FormEvent) {
-    e.preventDefault(); setBusy(true); setMsg('')
+    e.preventDefault(); setBusy(true); setMsg(''); setTestResult(null)
     const body: Record<string, any> = { llm_provider: provider || null }
     if (provider) {
       if (apiKey)  body.llm_api_key  = apiKey   // only sent when actually being set/rotated — never sent blank
@@ -82,7 +115,7 @@ export default function AIProviderSettingsCard({ org, brandColor, onSave }: Prop
         <div style={S.row}>
           <div>
             <label style={S.label}>Provider</label>
-            <select style={S.input} value={provider} onChange={e => setProvider(e.target.value)}>
+            <select style={S.input} value={provider} onChange={e => { setProvider(e.target.value); setTestResult(null) }}>
               <option value="">Use platform default</option>
               {Object.entries(PROVIDER_LABELS).map(([value, label]) => (
                 <option key={value} value={value}>{label}</option>
@@ -95,7 +128,7 @@ export default function AIProviderSettingsCard({ org, brandColor, onSave }: Prop
               <input
                 style={S.input}
                 value={model}
-                onChange={e => setModel(e.target.value)}
+                onChange={e => { setModel(e.target.value); setTestResult(null) }}
                 placeholder={PROVIDER_MODEL_HINTS[provider]}
                 required={provider === 'openai_compatible'}
               />
@@ -114,7 +147,7 @@ export default function AIProviderSettingsCard({ org, brandColor, onSave }: Prop
                 style={S.input}
                 type="password"
                 value={apiKey}
-                onChange={e => setApiKey(e.target.value)}
+                onChange={e => { setApiKey(e.target.value); setTestResult(null) }}
                 placeholder={keyBlankIsSafe ? '••••••••••••••••' : 'Paste your API key'}
                 required={!keyBlankIsSafe}
                 autoComplete="off"
@@ -126,7 +159,7 @@ export default function AIProviderSettingsCard({ org, brandColor, onSave }: Prop
                 <input
                   style={S.input}
                   value={baseUrl}
-                  onChange={e => setBaseUrl(e.target.value)}
+                  onChange={e => { setBaseUrl(e.target.value); setTestResult(null) }}
                   placeholder="e.g. https://api.groq.com/openai/v1"
                   required
                 />
@@ -135,20 +168,36 @@ export default function AIProviderSettingsCard({ org, brandColor, onSave }: Prop
           </div>
         )}
 
-        <div style={{ display:'flex', gap:'10px', alignItems:'center' }}>
+        <div style={{ display:'flex', gap:'10px', alignItems:'center', flexWrap:'wrap' }}>
           <button type="submit" disabled={busy} style={btnStyle}>{busy ? 'Saving…' : 'Save'}</button>
+          {provider && (
+            <button type="button" disabled={testBusy || !canTest} style={{ ...btnGhost, opacity: canTest ? 1 : 0.5 }} onClick={testConnection}>
+              {testBusy ? 'Testing…' : 'Test connection'}
+            </button>
+          )}
           {isConfigured && (
             <button
               type="button"
               disabled={busy}
               style={btnGhost}
-              onClick={() => { setProvider(''); setApiKey(''); setModel(''); setBaseUrl('') }}
+              onClick={() => { setProvider(''); setApiKey(''); setModel(''); setBaseUrl(''); setTestResult(null) }}
             >
               Reset to platform default
             </button>
           )}
           {msg && <span style={{ fontSize:'12px', color:'#72706A' }}>{msg}</span>}
         </div>
+
+        {testResult && (
+          <div style={{
+            marginTop: '12px', padding: '10px 12px', borderRadius: '8px', fontSize: '12.5px',
+            background: testResult.success ? '#EAF3DE' : '#FEF0EE',
+            color:      testResult.success ? '#27500A' : '#A32D2D',
+          }}>
+            <div style={{ fontWeight: 500 }}>{testResult.success ? '✓ ' : '✕ '}{testResult.message}</div>
+            {testResult.hint && <div style={{ marginTop: '4px' }}>{testResult.hint}</div>}
+          </div>
+        )}
       </form>
     </div>
   )
