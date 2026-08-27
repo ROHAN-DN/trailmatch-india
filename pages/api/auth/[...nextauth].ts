@@ -209,6 +209,15 @@ export const authOptions: NextAuthOptions = {
   },
 
   session: { strategy: 'jwt', maxAge: 30 * 24 * 60 * 60 },
+debug: true,
+  logger: {
+    error(code, metadata) {
+      console.error('[next-auth][error]', code, JSON.stringify(metadata))
+    },
+    warn(code) {
+      console.warn('[next-auth][warn]', code)
+    },
+  },  
 }
 
 export default NextAuth(authOptions)
