@@ -1,6 +1,6 @@
 import NextAuth, { NextAuthOptions } from 'next-auth'
 import GoogleProvider from 'next-auth/providers/google'
-import EmailProvider from 'next-auth/providers/email'
+// import EmailProvider from 'next-auth/providers/email'
 import { supabaseAdmin } from '../../../lib/supabase'
 import { checkLimit } from '../../../lib/gate'
 import { PLANS } from '../../../lib/plans'
@@ -24,42 +24,42 @@ export const authOptions: NextAuthOptions = {
       clientId:     process.env.GOOGLE_CLIENT_ID!,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
     }),
-    EmailProvider({
-      server: {
-        host:   'smtp.resend.com',
-        port:   465,
-        secure: true,
-        auth: { user: 'resend', pass: process.env.RESEND_API_KEY },
-      },
-      from: process.env.RESEND_FROM_EMAIL,
-      sendVerificationRequest: async ({ identifier, url, provider }) => {
-        const { Resend } = await import('resend')
-        const resend = new Resend(process.env.RESEND_API_KEY)
-        await resend.emails.send({
-          from:    provider.from!,
-          to:      identifier,
-          subject: 'Sign in to TrialMatch India',
-          html: `
-            <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:40px 24px">
-              <div style="background:#0F6E56;padding:18px 24px;border-radius:10px 10px 0 0">
-                <h1 style="color:#fff;margin:0;font-size:20px;font-weight:500">TrialMatch India</h1>
-              </div>
-              <div style="background:#fff;padding:28px 24px;border:1px solid #E2E0D8;border-top:none;border-radius:0 0 10px 10px">
-                <p style="color:#1C1B18;font-size:15px;line-height:1.6;margin:0 0 20px">
-                  Click the button below to sign in. This link expires in 24 hours.
-                </p>
-                <a href="${url}" style="display:inline-block;background:#0F6E56;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:500;font-size:14px">
-                  Sign in to TrialMatch
-                </a>
-                <p style="color:#72706A;font-size:12px;margin:20px 0 0;line-height:1.6">
-                  If you didn't request this, you can safely ignore this email.
-                </p>
-              </div>
-            </div>
-          `,
-        })
-      },
-    }),
+    // EmailProvider({
+    //   server: {
+    //     host:   'smtp.resend.com',
+    //     port:   465,
+    //     secure: true,
+    //     auth: { user: 'resend', pass: process.env.RESEND_API_KEY },
+    //   },
+    //   from: process.env.RESEND_FROM_EMAIL,
+    //   sendVerificationRequest: async ({ identifier, url, provider }) => {
+    //     const { Resend } = await import('resend')
+    //     const resend = new Resend(process.env.RESEND_API_KEY)
+    //     await resend.emails.send({
+    //       from:    provider.from!,
+    //       to:      identifier,
+    //       subject: 'Sign in to TrialMatch India',
+    //       html: `
+    //         <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:40px 24px">
+    //           <div style="background:#0F6E56;padding:18px 24px;border-radius:10px 10px 0 0">
+    //             <h1 style="color:#fff;margin:0;font-size:20px;font-weight:500">TrialMatch India</h1>
+    //           </div>
+    //           <div style="background:#fff;padding:28px 24px;border:1px solid #E2E0D8;border-top:none;border-radius:0 0 10px 10px">
+    //             <p style="color:#1C1B18;font-size:15px;line-height:1.6;margin:0 0 20px">
+    //               Click the button below to sign in. This link expires in 24 hours.
+    //             </p>
+    //             <a href="${url}" style="display:inline-block;background:#0F6E56;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:500;font-size:14px">
+    //               Sign in to TrialMatch
+    //             </a>
+    //             <p style="color:#72706A;font-size:12px;margin:20px 0 0;line-height:1.6">
+    //               If you didn't request this, you can safely ignore this email.
+    //             </p>
+    //           </div>
+    //         </div>
+    //       `,
+    //     })
+    //   },
+    // }),
   ],
 
   callbacks: {
