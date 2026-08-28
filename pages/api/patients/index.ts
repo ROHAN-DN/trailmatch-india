@@ -20,7 +20,7 @@ const PatientSchema = z.object({
   prior_treatments: z.string().optional(),
   biomarkers:       z.string().optional(),
   allergies:        z.string().optional(),
-  ecog_status:      z.string().optional(),
+  ecog_status:      z.string().optional().transform(v => (v === '' ? undefined : v)),
   notes:            z.string().optional(),
 }).merge(StructuredClinicalInput)
 
