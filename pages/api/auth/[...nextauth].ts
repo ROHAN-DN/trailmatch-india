@@ -105,33 +105,39 @@ export const authOptions: NextAuthOptions = {
           await supabaseAdmin().from('invitations')
             .update({ accepted_at: new Date().toISOString() })
             .eq('id', invite.id)
-        } else {
-          // New user — create personal org (they can rename it).
-          // Limits set explicitly from PLANS.trial (the single source of
-          // truth) rather than left to the organizations table's column
-          // defaults — those defaults previously didn't match PLANS.trial
-          // at all (50 patients / 5 users vs the advertised 10 / 2), so
-          // every self-signup org silently got several times the
-          // advertised free-trial capacity. See migration
-          // 020_match_job_limits.sql for the full story and the
-          // corrected defaults, kept as a defensive backstop.
-          const { data: org } = await supabaseAdmin()
-            .from('organizations')
-            .insert({
-              name: `${user.name || user.email}'s Workspace`, type: 'other',
-              plan: 'trial',
-              max_patients:             PLANS.trial.max_patients,
-              max_users:                PLANS.trial.max_users,
-              max_match_jobs_per_month: PLANS.trial.max_match_jobs_per_month,
-            })
-            .select('id').single()
-
-          await supabaseAdmin().from('users').insert({
-            email:   user.email,
-            name:    user.name,
-            org_id:  org!.id,
-            role:    'owner',
+       } else {
+        // New user – create personal org (they can rename it).
+        // Limits set explicitly from PLANS.trial...
+        const { data: org, error: orgError } = await supabaseAdmin()
+          .from('organizations')
+          .insert({
+            name: `${user.name || user.email}'s Workspace`,
+            type: 'other',
+            plan: 'trial',
+            max_patients: PLANS.trial.max_patients,
+            max_users: PLANS.trial.max_users,
+            max_match_jobs_per_month: PLANS.trial.max_match_jobs_per_month,
           })
+          .select('id')
+          .single()
+
+        if (orgError || !org) {
+          console.error('[signIn][org-create-failed]', JSON.stringify(orgError))
+          return false
+        }
+
+        const { error: userInsertError } = await supabaseAdmin()
+          .from('users')
+          .insert({
+            email: user.email,
+            name: user.name,
+            org_id: org.id,
+            role: 'owner',
+          })
+
+        if (userInsertError) {
+          console.error('[signIn][user-create-failed]', JSON.stringify(userInsertError))
+          return false
         }
       }
 
