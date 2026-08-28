@@ -19,15 +19,20 @@ import { roleRequiresMFA } from '../../../lib/mfa'
 // eager instance.
 
 export const authOptions: NextAuthOptions = {
+  debug: true,
+  logger: {
+    error(code, metadata) {
+      console.error('[next-auth][error]', code, JSON.stringify(metadata))
+    },
+    warn(code) {
+      console.warn('[next-auth][warn]', code)
+    },
+  },
   providers: [
     GoogleProvider({
       clientId:     process.env.GOOGLE_CLIENT_ID!,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
     }),
-    // EmailProvider({
-    //   server: {
-    //     host:   'smtp.resend.com',
-    //     port:   465,
     //     secure: true,
     //     auth: { user: 'resend', pass: process.env.RESEND_API_KEY },
     //   },
