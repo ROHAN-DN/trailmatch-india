@@ -51,9 +51,10 @@ function getAssetPaths() {
   if (cachedAssetPaths) return cachedAssetPaths
   const require = createRequire(import.meta.url)
   const pkgPath = path.dirname(require.resolve('pdfjs-dist/package.json'))
+  const toPosixUrl = (p: string) => p.split(path.sep).join('/')
   cachedAssetPaths = {
-    standardFontDataUrl: path.join(pkgPath, 'standard_fonts') + path.sep,
-    cMapUrl:              path.join(pkgPath, 'cmaps') + path.sep,
+    standardFontDataUrl: toPosixUrl(path.join(pkgPath, 'standard_fonts')) + '/',
+    cMapUrl: toPosixUrl(path.join(pkgPath, 'cmaps')) + '/',
   }
   return cachedAssetPaths
 }
