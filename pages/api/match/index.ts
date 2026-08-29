@@ -93,21 +93,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   // until the batch finishes, instead of risking early termination.
   waitUntil(processBatch())
 
-  async function processOnePatient(patient: any): Promise<{ strong: number; partial: number; failed: boolean }> {
-    // Everything for this one patient lives inside this single try/catch —
-    // including the initial status update, which the original sequential
-    // version left outside its try/catch (a real, if unlikely, latent bug:
-    // a transient DB error on just that one call would have aborted the
-    // entire remaining batch, not just this patient). Now under bounded
-    // concurrency that same gap would be worse — an uncaught rejection
-    // here would reject the whole Promise.all for this patient's chunk,
-    // silently orphaning its chunk-mates from lib/concurrency.ts's
-    // perspective (see that file's own header comment on why `worker`
-    // must never reject). This function is now guaranteed to always
-    // resolve, never reject, regardless of what fails inside it.
-    try {
-      await db.from('match_results').update({ status: 'running' })
+      try {
+      const { error: runningErr } = await db.from('match_results').update({ status: 'running' })
         .eq('job_id', job!.id).eq('patient_id', patient.id)
+      if (runningErr) console.error(`[match] Failed to set 'running' status for patient ${patient.id}:`, JSON.stringify(runningErr))
 
       const clinical = await readStructuredClinicalData(db, org_id, patient.id)
       const clinicalData = 'error' in clinical ? null : clinical
@@ -117,10 +106,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const pdfBuffer = generateReportPDF(patient, result)
       const fileName  = `${org_id}/${job!.id}/${patient.patient_code}.pdf`
 
-      await supabaseAdmin().storage.from('reports')
+      const { error: uploadErr } = await supabaseAdmin().storage.from('reports')
         .upload(fileName, pdfBuffer, { contentType: 'application/pdf', upsert: true })
-      const { data: urlData } = supabaseAdmin().storage.from('reports').getPublicUrl(fileName)
-      const reportUrl = urlData?.publicUrl || null
+      let reportUrl: string | null = null
+      if (uploadErr) {
+        console.error(`[match] Report upload failed for patient ${patient.id}, proceeding without a report link:`, JSON.stringify(uploadErr))
+      } else {
+        const { data: urlData } = supabaseAdmin().storage.from('reports').getPublicUrl(fileName)
+        reportUrl = urlData?.publicUrl || null
+      }
 
       let emailSentAt = null
       if (send_email && email_to) {
@@ -149,10 +143,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         } catch (e) { console.error('WhatsApp failed:', e) }
       }
 
-      // Email notification runs in parallel with WhatsApp — not as a fallback.
-      // WhatsApp requires an open 24h session to deliver; a coordinator who hasn't
-      // messaged the business number recently gets nothing from WhatsApp alone.
-      // Email guarantees delivery regardless of session state.
       if (notifSettings?.notify_email && notifSettings?.email_on_match_complete && patients!.length === 1) {
         // Already sent above via sendMatchReport — skip duplicate
       } else if (notifSettings?.notify_email && notifSettings?.notify_on_match_complete) {
@@ -165,53 +155,29 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         } catch (e) { console.error('Match-complete email failed:', e) }
       }
 
-      await db.from('match_results').update({
+      const { error: doneErr } = await db.from('match_results').update({
         status: 'done', trials_searched: result.trialsSearched,
         ctgov_count: result.ctgovCount, ctri_count: result.ctriCount,
         summary: result.summary, matches: result.matches, not_matched: result.notMatched,
         source_status: result.sourceStatus,
         report_url: reportUrl, email_sent_at: emailSentAt, updated_at: new Date().toISOString(),
       }).eq('job_id', job!.id).eq('patient_id', patient.id)
-
-      // Enrollment monitor task creation: this used to be done here directly
-      // via `.insert({...}).onConflict('match_result_id').ignore()` — but
-      // `.onConflict()` is not a real method on the Supabase JS query builder
-      // after `.insert()` (that's not how conflict handling works in
-      // supabase-js v2; it requires `.upsert(data, { onConflict, ... })`
-      // instead). That call threw a TypeError on every single successful
-      // match, which was caught by the surrounding try/catch below and
-      // silently flipped this match_results row to status:'error' — AFTER
-      // the PDF/email/WhatsApp notification had already gone out. A
-      // coordinator would receive "your results are ready" and then see the
-      // job marked failed on the dashboard.
-      //
-      // migration 013_fixes.sql adds a DB trigger
-      // (create_enrollment_monitor_task, AFTER UPDATE ON match_results) that
-      // creates this row automatically and correctly — using real SQL
-      // `ON CONFLICT (match_result_id) DO NOTHING`, backed by a unique
-      // constraint that same migration adds (fixed — see
-      // FIXES_2026-07-28.md; the constraint's own creation had an
-      // unrelated syntax bug that silently prevented it from ever being
-      // created) — every time a match_results row transitions to
-      // status='done', which is exactly what the update above just did.
-      // That trigger is the single source of truth for this now;
-      // duplicating it here in application code was both broken and, once
-      // fixed, redundant.
+      if (doneErr) {
+        throw new Error(`Failed to save match results: ${JSON.stringify(doneErr)}`)
+      }
 
       return { strong, partial, failed: false }
     } catch (err: any) {
+      console.error(`[match] Patient ${patient.id} failed:`, err.message)
       try {
-        await db.from('match_results').update({ status: 'error', error_msg: err.message })
+        const { error: errStatusErr } = await db.from('match_results').update({ status: 'error', error_msg: err.message })
           .eq('job_id', job!.id).eq('patient_id', patient.id)
+        if (errStatusErr) console.error(`[match] Failed to record error status for patient ${patient.id}:`, JSON.stringify(errStatusErr))
       } catch (innerErr) {
-        // Even the error-status write itself failed — log it, but this
-        // function still must resolve rather than throw (see this
-        // function's own opening comment).
         console.error(`[match] Failed to record error status for patient ${patient.id}:`, innerErr)
       }
       return { strong: 0, partial: 0, failed: true }
     }
-  }
 
   async function processBatch() {
     let strongTotal = 0, partialTotal = 0, failedCount = 0, done = 0
