@@ -93,7 +93,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   // until the batch finishes, instead of risking early termination.
   waitUntil(processBatch())
 
-      try {
+    async function processOnePatient(patient: any): Promise<{ strong: number; partial: number; failed: boolean }> {
+    try {
       const { error: runningErr } = await db.from('match_results').update({ status: 'running' })
         .eq('job_id', job!.id).eq('patient_id', patient.id)
       if (runningErr) console.error(`[match] Failed to set 'running' status for patient ${patient.id}:`, JSON.stringify(runningErr))
@@ -178,6 +179,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
       return { strong: 0, partial: 0, failed: true }
     }
+  }   
 
   async function processBatch() {
     let strongTotal = 0, partialTotal = 0, failedCount = 0, done = 0
