@@ -53,7 +53,7 @@ export default function Dashboard() {
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [selected,   setSelected]   = useState<Set<string>>(new Set())
   const [editPatient,setEditPatient]= useState<any>(null)
-
+  const [matchingIds, setMatchingIds] = useState<Set<string>>(new Set())
   const isSponsor = SPONSOR_ORG_TYPES.includes(org?.org_type || '')
 
   const load = useCallback(async () => {
@@ -264,14 +264,27 @@ export default function Dashboard() {
                           <div style={{ display:'flex', gap:'6px' }}>
                             <button style={{ ...S.btn(false), padding:'5px 10px', fontSize:'12px' }} onClick={() => setEditPatient(p)}>Edit</button>
                             <button
-                              style={{ ...S.btn(), padding:'5px 10px', fontSize:'12px', background: brandColor }}
-                              onClick={async () => {
-                                const r = await fetch('/api/match', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ patient_ids:[p.id] }) })
-                                const d = await r.json()
-                                if (d.job_id) { setTab('jobs'); load() }
-                              }}
-                            >Match</button>
-                          </div>
+  style={{ ...S.btn(), padding: '5px 10px', fontSize: '12px', background: brandColor, opacity: matchingIds.has(p.id) ? 0.6 : 1 }}
+  disabled={matchingIds.has(p.id)}
+  onClick={async () => {
+    setMatchingIds(prev => new Set(prev).add(p.id))
+    try {
+      const r = await fetch('/api/match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ patient_ids: [p.id] }) })
+      const d = await r.json()
+      if (d.job_id) {
+        setTab('jobs'); load()
+      } else {
+        alert(d.error || `Match request failed (${r.status}). Please try again.`)
+      }
+    } catch (e) {
+      alert('Match request failed – check your connection and try again.')
+    } finally {
+      setMatchingIds(prev => { const next = new Set(prev); next.delete(p.id); return next })
+    }
+  }}
+>
+  {matchingIds.has(p.id) ? 'Matching...' : 'Match'}
+</button>
                         </td>
                       </tr>
                     ))}
