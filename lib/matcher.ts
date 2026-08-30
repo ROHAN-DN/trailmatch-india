@@ -154,7 +154,7 @@ async function fetchWithRetry(url: string, init: RequestInit, retries = 1, backo
 async function fetchCTgov(diagnosis: string): Promise<FetchOutcome> {
   try {
     const term = encodeURIComponent(diagnosis)
-    const url  = `https://clinicaltrials.gov/api/v2/studies?query.cond=${term}&filter.overallStatus=RECRUITING&filter.locn=India&pageSize=12&fields=NCTId,BriefTitle,BriefSummary,EligibilityCriteria,Phase,LeadSponsorName,LocationCity,LocationFacility,LocationCountry,Sex,MinimumAge,MaximumAge`
+    const url  = `https://clinicaltrials.gov/api/v2/studies?query.cond=${term}&filter.overallStatus=RECRUITING&query.locn=India&pageSize=12&fields=NCTId,BriefTitle,BriefSummary,EligibilityCriteria,Phase,LeadSponsorName,LocationCity,LocationFacility,LocationCountry,Sex,MinimumAge,MaximumAge`
     const res  = await fetchWithRetry(url, { next: { revalidate: 3600 } }) // cache 1hr
     if (!res.ok) return { trials: [], status: 'error', error: `ClinicalTrials.gov returned HTTP ${res.status}` }
     const data = await res.json()
