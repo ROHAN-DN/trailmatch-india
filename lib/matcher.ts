@@ -12,6 +12,49 @@ import { parseCTRIBulkExport, filterCTRIBulkTrialsByDiagnosis } from './ctri-bul
 // also holds the temporary free-model testing shim — see that file's
 // header comment for how to use it and why it's there.
 
+/**
+ * Extracts and parses a JSON object from raw LLM output. Handles the
+ * common case where a reasoning model (e.g. NVIDIA Nemotron) prepends
+ * its chain-of-thought reasoning as plain prose before the actual JSON
+ * answer, rather than confining it to a separate reasoning channel or
+ * respecting the ```json fence the prompt requests. Tries a direct
+ * parse first (the fast, common case for non-reasoning models), and
+ * only attempts the more careful brace-matching extraction below if
+ * that fails.
+ */
+function extractJSON(raw: string): any {
+  const stripped = raw.replace(/```json|```/g, '').trim()
+
+  try {
+    return JSON.parse(stripped)
+  } catch { /* fall through to the more forgiving extraction below */ }
+
+  // Walk from the first '{' and track brace nesting depth (while
+  // correctly ignoring braces inside string values — trial eligibility
+  // text can plausibly contain literal { or } characters) to find the
+  // true matching close brace for the outermost JSON object, rather
+  // than naively assuming the LAST '}' in the text is the right one —
+  // which would misfire if reasoning prose before or after the JSON
+  // happens to mention braces of its own.
+  const start = stripped.indexOf('{')
+  if (start === -1) throw new Error('No JSON object found in response')
+
+  let depth = 0, inString = false, escapeNext = false
+  for (let i = start; i < stripped.length; i++) {
+    const ch = stripped[i]
+    if (escapeNext)      { escapeNext = false; continue }
+    if (ch === '\\')     { escapeNext = true; continue }
+    if (ch === '"')      { inString = !inString; continue }
+    if (inString)        continue
+    if (ch === '{')      depth++
+    else if (ch === '}') {
+      depth--
+      if (depth === 0) return JSON.parse(stripped.slice(start, i + 1))
+    }
+  }
+  throw new Error('Unbalanced JSON object in response — no matching closing brace found')
+}
+
 export interface Patient {
   id?:              string
   org_id?:          string
@@ -432,11 +475,10 @@ structuredCriteria array for it — do not omit the trial from the response enti
   }, llmConfig)
 
   const raw   = response.content.map(c => (c as any).text || '').join('')
-  const clean = raw.replace(/```json|```/g, '').trim()
 
   let result: any
   try {
-    result = JSON.parse(clean)
+    result = extractJSON(raw)
   } catch (err) {
     // Extraction failing must not fail the whole match — a trial simply
     // falls back to whatever the rule-based pass alone found for it
@@ -687,11 +729,10 @@ criteria only, not a final answer.`
   }, llmConfig)
 
   const raw   = response.content.map(c => (c as any).text || '').join('')
-  const clean = raw.replace(/```json|```/g, '').trim()
 
   let result: any
   try {
-    result = JSON.parse(clean)
+    result = extractJSON(raw)
   } catch (err) {
     throw new Error(
       `AI response could not be parsed as valid JSON. This usually means the response was truncated ` +
