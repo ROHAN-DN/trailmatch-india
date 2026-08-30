@@ -29,13 +29,6 @@ function extractJSON(raw: string): any {
     return JSON.parse(stripped)
   } catch { /* fall through to the more forgiving extraction below */ }
 
-  // Walk from the first '{' and track brace nesting depth (while
-  // correctly ignoring braces inside string values — trial eligibility
-  // text can plausibly contain literal { or } characters) to find the
-  // true matching close brace for the outermost JSON object, rather
-  // than naively assuming the LAST '}' in the text is the right one —
-  // which would misfire if reasoning prose before or after the JSON
-  // happens to mention braces of its own.
   const start = stripped.indexOf('{')
   if (start === -1) throw new Error('No JSON object found in response')
 
@@ -74,22 +67,8 @@ export interface Patient {
   notes?:           string
 }
 
-// Structured clinical data for one patient — see migration 017 and
-// lib/clinical-data.ts. Optional throughout this file: a patient entered
-// only through the legacy free-text fields (pre-structured-intake) simply
-// gets no deterministic evaluation, and every criterion falls back to
-// Claude's own interpretation, exactly as it did before this feature
-// existed. Structured data being available is what unlocks it, not a
-// required precondition for matching to work at all.
 export type ClinicalData = EvaluableClinicalData
 
-// Only two real sources exist. Intentionally strict (not `string`) — if a
-// third "source" value is ever reintroduced (e.g. an AI-fallback path),
-// every place that constructs a TrialMatch will fail to compile until it's
-// handled explicitly, instead of silently typechecking like a free-text
-// value would. This mirrors the shared type in lib/types/domain.ts, which
-// was already this strict — lib/matcher.ts previously kept its own looser
-// local copy and drifted from it.
 export type TrialSource = 'ClinicalTrials.gov' | 'CTRI'
 
 export interface TrialMatch {
@@ -108,28 +87,9 @@ export interface TrialMatch {
   criteriaPartial:  string[]
   criteriaFail:     string[]
   nextSteps:        string
-  /**
-   * Criteria that were evaluated deterministically — in code, against the
-   * patient's real structured clinical data — rather than judged by the
-   * model. Each entry's `result` fed directly into criteriaMet/
-   * criteriaFail/criteriaPartial above (a PASS/FAIL here is never left for
-   * Claude to also weigh in on; see scoreWithClaude). Empty when the
-   * patient has no structured clinical data yet, or when none of this
-   * trial's criteria were extractable into a structured, checkable form.
-   */
   deterministicResults: Array<{ description: string; category: string; result: 'PASS' | 'FAIL' | 'UNKNOWN'; evidence: string; extractionSource: 'rule_based' | 'ai_extracted' }>
 }
 
-/**
- * Per-source fetch outcome. 'error' means the live registry could not be
- * reached, timed out, or returned unparseable data — it does NOT mean zero
- * trials exist. Collapsing that distinction is what previously let the
- * system fall back to asking the model to invent fictional trials whenever
- * a fetch merely failed. That fallback has been removed entirely (see
- * scoreWithClaude below); this type exists so the UI can now show a
- * coordinator the honest difference between "nothing live found" and
- * "we couldn't check right now."
- */
 export interface SourceStatus {
   ctgov:       'ok' | 'error'
   ctri:        'ok' | 'error'
@@ -166,22 +126,11 @@ interface FetchOutcome {
   error?: string
 }
 
-// ── Retry helper for transient network failures ───────────────
-// Both live registries are external, unauthenticated, and outside our
-// control — a single dropped connection or transient 5xx shouldn't be
-// treated the same as "the registry is actually down," which is what
-// determines whether a coordinator sees a real result or an honest
-// "couldn't check right now" message (see scoreWithClaude below). One
-// retry with a short fixed backoff meaningfully reduces false "error"
-// classifications from brief blips without adding much latency to the
-// common case where the first attempt just works.
 async function fetchWithRetry(url: string, init: RequestInit, retries = 1, backoffMs = 400): Promise<Response> {
   let lastErr: unknown
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const res = await fetch(url, init)
-      // Only retry on server errors / rate limiting — a 4xx (other than 429)
-      // means the request itself is wrong and won't succeed on retry.
       if (res.ok || (res.status < 500 && res.status !== 429) || attempt === retries) return res
       lastErr = new Error(`HTTP ${res.status}`)
     } catch (err) {
@@ -193,12 +142,11 @@ async function fetchWithRetry(url: string, init: RequestInit, retries = 1, backo
   throw lastErr
 }
 
-// ── Fetch from ClinicalTrials.gov ─────────────────────────────
 async function fetchCTgov(diagnosis: string): Promise<FetchOutcome> {
   try {
     const term = encodeURIComponent(diagnosis)
     const url  = `https://clinicaltrials.gov/api/v2/studies?query.cond=${term}&filter.overallStatus=RECRUITING&query.locn=India&pageSize=12&fields=NCTId,BriefTitle,BriefSummary,EligibilityCriteria,Phase,LeadSponsorName,LocationCity,LocationFacility,LocationCountry,Sex,MinimumAge,MaximumAge`
-    const res  = await fetchWithRetry(url, { next: { revalidate: 3600 } }) // cache 1hr
+    const res  = await fetchWithRetry(url, { next: { revalidate: 3600 } })
     if (!res.ok) return { trials: [], status: 'error', error: `ClinicalTrials.gov returned HTTP ${res.status}` }
     const data = await res.json()
     const trials: RawTrial[] = (data.studies || []).map((s: any) => {
@@ -225,42 +173,13 @@ async function fetchCTgov(diagnosis: string): Promise<FetchOutcome> {
         minAge: elig.minimumAge || '',
         maxAge: elig.maximumAge || '',
       }
-    }).filter((t: RawTrial) => t.nctId) // a trial we can't cite by ID is useless downstream
+    }).filter((t: RawTrial) => t.nctId)
     return { trials, status: 'ok' }
   } catch (err) {
     return { trials: [], status: 'error', error: `ClinicalTrials.gov fetch failed: ${(err as Error).message}` }
   }
 }
 
-// ── Fetch from CTRI (India registry) ─────────────────────────
-// No official CTRI search API exists, and (see fetchCTRISearchScrape's
-// own comment below) the live search page is CAPTCHA-gated — a dead end
-// for automated matching, not just fragile. This orchestrates two
-// genuinely different strategies rather than committing to either one
-// blind, because neither has been verifiable from this environment
-// (ctri.nic.in isn't reachable from this sandbox at all):
-//
-//   1. fetchCTRIBulkExport — a bulk data-export endpoint
-//      (scripts/seed-site-twins.ts already referenced this same URL for
-//      a different purpose, never verified either). Export endpoints are
-//      architecturally the kind of thing that typically ISN'T
-//      CAPTCHA-gated the way an interactive search form is — they exist
-//      specifically for bulk/programmatic consumption. If this works,
-//      it's strictly better than scraping: no proxy dependency, no
-//      regex-parsing HTML, the complete trial list rather than whatever
-//      a search happened to surface.
-//   2. fetchCTRISearchScrape — the original approach, kept as a fallback,
-//      unchanged.
-//
-// Strategy 1 is trusted ONLY when it reports looksValid (see
-// lib/ctri-bulk-export.ts) — a real structural check, not just "the HTTP
-// request succeeded." Anything else falls through to strategy 2. Neither
-// working is still possible; that's reported honestly (status:'error'
-// with both attempts' details), not silently swallowed. Whichever
-// strategy actually works once this runs against the real internet is
-// something only a real deployment can settle — this makes that
-// immediately observable via server logs rather than requiring another
-// guess-and-ship cycle.
 async function fetchCTRI(diagnosis: string): Promise<FetchOutcome> {
   const bulkResult = await fetchCTRIBulkExport(diagnosis)
   if (bulkResult.status === 'ok') return bulkResult
@@ -276,13 +195,6 @@ async function fetchCTRI(diagnosis: string): Promise<FetchOutcome> {
   }
 }
 
-// Strategy 1 — bulk export. Direct fetch, no CORS proxy: this runs
-// server-side (inside a Next.js API route / Node.js), and CORS is a
-// browser-enforced mechanism that server-to-server fetches were never
-// subject to in the first place — the proxy dependency in strategy 2
-// predates this function and was never actually necessary for that
-// reason either, but that one is left alone rather than changed
-// speculatively (see fetchCTRISearchScrape's own comment).
 async function fetchCTRIBulkExport(diagnosis: string): Promise<FetchOutcome> {
   try {
     const url = 'https://ctri.nic.in/ctri/Utils/exportData.php?Id=all&stype=full'
@@ -321,7 +233,6 @@ async function fetchCTRIBulkExport(diagnosis: string): Promise<FetchOutcome> {
   }
 }
 
-// Strategy 2 — the original search-page scrape.
 async function fetchCTRISearchScrape(diagnosis: string): Promise<FetchOutcome> {
   try {
     const q    = encodeURIComponent(diagnosis)
@@ -333,11 +244,6 @@ async function fetchCTRISearchScrape(diagnosis: string): Promise<FetchOutcome> {
     const html  = data.contents || ''
     if (!html) return { trials: [], status: 'error', error: 'CTRI proxy returned empty content' }
 
-    // A GET request can never supply a CAPTCHA solution, so a challenge
-    // page here is a fetch failure in substance even though the HTTP
-    // request itself succeeded — this must NOT be allowed to fall through
-    // to the row-parsing below, which would just find zero rows and look
-    // identical to "no trials for this diagnosis."
     if (/security\s*code|captcha/i.test(html)) {
       return { trials: [], status: 'error', error: 'CTRI returned a CAPTCHA/security-code challenge instead of search results — this endpoint likely needs re-verification against the live site, see this function\'s header comment' }
     }
@@ -363,14 +269,6 @@ async function fetchCTRISearchScrape(diagnosis: string): Promise<FetchOutcome> {
       })
       count++
     }
-    // A successful HTTP fetch that parses zero rows from non-trivial HTML is
-    // a real signal worth distinguishing from "no trials exist" — it's the
-    // leading indicator that CTRI changed its page markup and the regex
-    // parsing above silently stopped working, since this scrapes an
-    // unofficial HTML page rather than a stable API. This still returns
-    // status:'ok' (the fetch itself succeeded, so scoreWithClaude's honest
-    // "no results found" messaging is the right user-facing behaviour) —
-    // this log line is for server-side monitoring, not the coordinator.
     if (trials.length === 0 && html.length > 500) {
       console.warn(`[matcher] fetchCTRI parsed 0 trials from a ${html.length}-byte non-empty response for "${diagnosis}" — possible CTRI markup change breaking the scraper. Investigate if this repeats across different diagnoses.`)
     }
@@ -380,28 +278,11 @@ async function fetchCTRISearchScrape(diagnosis: string): Promise<FetchOutcome> {
   }
 }
 
-// Two criteria are treated as the same real-world criterion if they share
-// a category and the field that actually identifies what's being checked
-// (test_name for a lab, medication_name for a medication, etc.),
-// case-insensitively. Module-level (not nested in scoreWithClaude) because
-// both Call 1's extraction-dedup and Call 2's reconciliation used to need
-// it — now only Call 1 does, but kept here rather than re-nested, since a
-// shared definition of "same criterion" shouldn't silently drift into two
-// slightly different copies if this is ever needed elsewhere again.
 function criterionKey(c: Criterion): string {
   const identifier = c.test_name ?? c.medication_name ?? c.medication_class ?? c.marker ?? c.condition ?? c.allergy_substance ?? ''
   return `${c.category}::${identifier.toLowerCase().trim()}`
 }
 
-// ── Call 1 — trial-only criteria extraction ───────────────────
-// No Patient parameter anywhere in this signature — not a convention, a
-// structural guarantee: it is not possible for patient data to reach this
-// prompt, because there is no patient data in scope to put there. This is
-// the actual fix for the privacy gap this project's own Tier 1 disclosure
-// named: "the patient block and the residual trial text are still in the
-// same call... splitting those into two calls... was proposed a few turns
-// back and never built." Only ever called for trials that are a genuine
-// cache miss with real residual text — see scoreWithClaude's call site.
 async function extractResidualCriteriaViaClaude(
   trialsNeedingExtraction: RawTrial[],
   extractionByTrial: Map<string, { unparsedStatements: string[]; knownCriteria: Criterion[] }>,
@@ -470,7 +351,7 @@ If a trial's "Remaining eligibility statements" contains nothing objectively ext
 structuredCriteria array for it — do not omit the trial from the response entirely.`
 
   const response = await createChatCompletion({
-    max_tokens: 3000,
+    max_tokens: 8000,
     messages:   [{ role: 'user', content: prompt }],
   }, llmConfig)
 
@@ -480,10 +361,6 @@ structuredCriteria array for it — do not omit the trial from the response enti
   try {
     result = extractJSON(raw)
   } catch (err) {
-    // Extraction failing must not fail the whole match — a trial simply
-    // falls back to whatever the rule-based pass alone found for it
-    // (already in extractionByTrial's knownCriteria before this function
-    // was ever called), same as if it had no residual text at all.
     console.warn(`[matcher] Extraction response could not be parsed as JSON — falling back to rule-based-only criteria for the ${trialsNeedingExtraction.length} trial(s) in this call: ${(err as Error).message}`)
     return new Map()
   }
@@ -491,11 +368,6 @@ structuredCriteria array for it — do not omit the trial from the response enti
   const out = new Map<string, Criterion[]>()
   if (!Array.isArray(result.trials)) return out
 
-  // Claude may echo nctId back with different case/whitespace than the
-  // canonical trial object has — match normalized, but key the output map
-  // by the ORIGINAL canonical id, since that's what the caller looks up
-  // with (extracted.get(t.nctId) in scoreWithClaude). Same normalization
-  // this file already relies on elsewhere for exactly this reason.
   const canonicalByNormalizedId = new Map(trialsNeedingExtraction.map(t => [t.nctId.trim().toUpperCase(), t.nctId]))
 
   for (const t of result.trials) {
@@ -520,32 +392,12 @@ structuredCriteria array for it — do not omit the trial from the response enti
   return out
 }
 
-// ── Claude AI matching ────────────────────────────────────────
 async function scoreWithClaude(patient: Patient, trials: RawTrial[], sourceStatus: SourceStatus, clinicalData: ClinicalData | null, cacheStore?: TrialCriteriaCacheStore, providedLlmConfig?: LLMProviderConfig): Promise<MatchResult> {
-  // Resolved once per match run if not already provided by the caller.
-  // REAL INEFFICIENCY FOUND AND FIXED HERE (caught in review): batch
-  // matching (pages/api/match/index.ts) calls matchPatient once per
-  // patient, all from the same org — without this optional parameter,
-  // that meant one redundant DB round-trip AND one redundant AES
-  // decrypt per patient just to answer a question with the same answer
-  // for the whole batch. The batch caller now resolves this once,
-  // upfront, and passes it through every patient in the batch. Callers
-  // that don't pre-resolve (e.g. a single ad-hoc match) still get
-  // correct behavior — it's just resolved here instead.
   const llmConfig = providedLlmConfig ?? await resolveLLMConfig(patient.org_id)
 
   const ctgovCount = trials.filter(t => t.source === 'ClinicalTrials.gov').length
   const ctriCount  = trials.filter(t => t.source === 'CTRI').length
 
-  // ── No live trial data retrieved ────────────────────────────
-  // Previously this branch asked Claude to "generate 4 realistic, medically
-  // accurate example trials" and tag them "AI-Synthesised" whenever both
-  // fetches came back empty. That tag was never checked anywhere in the UI
-  // (BatchPanel, MatchExplainability render every match identically
-  // regardless of source), so a coordinator could receive a fabricated
-  // trial — fake NCT ID, fake sponsor, fake eligibility criteria — with a
-  // "STRONG MATCH" badge and no way to tell it wasn't real. We return an
-  // honest empty result instead. It's a worse demo and a better product.
   if (trials.length === 0) {
     const bothFailed = sourceStatus.ctgov === 'error' && sourceStatus.ctri === 'error'
     const bothOk      = sourceStatus.ctgov === 'ok' && sourceStatus.ctri === 'ok'
@@ -566,25 +418,10 @@ async function scoreWithClaude(patient: Patient, trials: RawTrial[], sourceStatu
     }
   }
 
-  // ── Trial criteria extraction — cache-aware ───────────────────────────
-  // This is the actual point of this file's design, extended: the
-  // rule-based pass (regex/dictionary/negation, zero LLM — see
-  // lib/rule-based-extraction.ts) still gets first crack at every trial's
-  // eligibility text, exactly as before. New: before even doing that, each
-  // trial is checked against the cache (source + trial ID + a content
-  // hash of its exact eligibility text — see lib/trial-criteria-cache.ts).
-  // A hit means this exact protocol text has already been fully extracted
-  // — rule-based AND whatever Claude previously extracted from the
-  // residual — and there is nothing left to (re-)extract, only this
-  // patient's own evaluation and interpretation to do. A miss (never
-  // seen before, or the trial's eligibility text has changed since it was
-  // last cached) falls back to the rule-based pass exactly as before.
   interface TrialExtractionContext {
-    /** Authoritative criteria for this trial — never re-extracted, never duplicated. Starts as the cached set (hit) or the rule-based-only set (miss); a miss gets topped up with Call 1's output below, before Call 2 ever runs. */
     knownCriteria:       Criterion[]
     cacheHit:            boolean
     eligibilityTextHash: string
-    /** Only meaningful on a miss — what the rule-based pass couldn't classify, i.e. what Call 1 extracts from. */
     unparsedStatements:  string[]
   }
   const extractionByTrial = new Map<string, TrialExtractionContext>()
@@ -604,15 +441,6 @@ async function scoreWithClaude(patient: Patient, trials: RawTrial[], sourceStatu
     }
   }))
 
-  // ── Call 1 — trial-only criteria extraction, patient data never present ──
-  // Genuinely two separate Claude calls now, not one combined prompt. Only
-  // trials that are a cache miss AND still have residual text after the
-  // rule-based pass need this at all — a trial with everything already
-  // known (from cache, or because the rule-based pass alone covered all of
-  // it) skips this entirely. Whatever this call extracts is cached
-  // immediately below, so a given trial's real-world need for this call
-  // shrinks to "the first time any patient anywhere is matched against
-  // it" — extract once, reuse forever, same as the cache's own rationale.
   const cacheWrites: Promise<void>[] = []
   const trialsNeedingExtraction = trials.filter(t => {
     const ctx = extractionByTrial.get(t.nctId)!
@@ -623,11 +451,6 @@ async function scoreWithClaude(patient: Patient, trials: RawTrial[], sourceStatu
     for (const t of trialsNeedingExtraction) {
       const ctx = extractionByTrial.get(t.nctId)!
       const newlyExtracted = extracted.get(t.nctId) ?? []
-      // Same dedup reasoning as before, just running one step earlier now
-      // that extraction is its own call instead of interleaved with
-      // scoring: Call 1 should only ever add NEW criteria beyond what the
-      // rule-based pass already found for THIS trial, but "should" is an
-      // instruction, not a guarantee.
       const knownKeys = new Set(ctx.knownCriteria.map(criterionKey))
       const deduped = newlyExtracted.filter(c => {
         const isDuplicate = knownKeys.has(criterionKey(c))
@@ -645,12 +468,6 @@ async function scoreWithClaude(patient: Patient, trials: RawTrial[], sourceStatu
     }
   }
 
-  // ── Call 2 — patient scoring + interpretation, nothing left to extract ──
-  // Every trial's criteria are fully known by this point — from cache, or
-  // from Call 1 moments ago — so every trial gets the same framing: final,
-  // do not extract, do not duplicate. There is no more "residual text,
-  // please extract from this" branch here at all; that instruction now
-  // lives entirely in Call 1's own prompt, which never sees a patient.
   const trialsContext = `${trials.length} live trial(s) retrieved:\n\n` +
     trials.map((t, i) => {
       const ctx = extractionByTrial.get(t.nctId)!
@@ -724,7 +541,7 @@ regardless of what you set here — treat this field as your best estimate from 
 criteria only, not a final answer.`
 
   const response = await createChatCompletion({
-    max_tokens: 4000,
+    max_tokens: 16000,
     messages:   [{ role: 'user', content: prompt }],
   }, llmConfig)
 
@@ -740,18 +557,10 @@ criteria only, not a final answer.`
     )
   }
 
-  // Validate the shape we actually need — fail clearly rather than silently
-  // passing through a result the UI can't render.
   if (!Array.isArray(result.matches)) {
     throw new Error('AI response was missing the expected "matches" array. Please try again.')
   }
 
-  // ── Defense in depth against fabrication ────────────────────
-  // The prompt instructs the model not to invent trials, but a prompt
-  // instruction is a request, not a guarantee — models can still err.
-  // Rather than trust it alone, structurally drop any returned match whose
-  // nctId doesn't correspond to a trial we actually retrieved. This makes
-  // fabrication unable to reach the UI, not just discouraged from it.
   const knownIds = new Set(trials.map(t => t.nctId.trim().toUpperCase()))
   const rawMatches: any[] = result.matches
   const survivingRawMatches = rawMatches.filter(m => {
@@ -762,9 +571,6 @@ criteria only, not a final answer.`
   const droppedCount = rawMatches.length - survivingRawMatches.length
   let summary = String(result.summary || '')
   if (droppedCount > 0) {
-    // Should not normally trigger given the prompt instruction above — if it
-    // does, it's logged so it's visible in server logs, and the coordinator
-    // is told honestly rather than silently shown a shorter list.
     console.error(
       `[matcher] Dropped ${droppedCount} match(es) for patient ${patient.patient_code} whose ` +
       `nctId did not match any retrieved trial — possible model fabrication, filtered before reaching the UI.`
@@ -774,20 +580,6 @@ criteria only, not a final answer.`
 
   const trialsByNormalizedId = new Map(trials.map(t => [t.nctId.trim().toUpperCase(), t]))
 
-  // ── Deterministic reconciliation ────────────────────────────
-  // This is the actual point of this whole file's redesign: for every
-  // criterion this trial has (all of it known before Call 2 ever ran — see
-  // above), we do not use the model's own opinion of whether the patient
-  // satisfies it (it never gave one — see the prompt above) — we compute
-  // PASS/FAIL/UNKNOWN ourselves, in code, against the patient's real
-  // on-file clinical records, and that result is what reaches
-  // criteriaMet/criteriaFail/criteriaPartial. Only genuinely non-structured
-  // criteria (the model's interpretedCriteria* buckets) carry the model's
-  // own judgment through. Simpler than it used to be: since Call 2 is
-  // never asked to (and no longer even has schema for) returning
-  // structuredCriteria, there's no merging/deduping of anything from this
-  // response left to do here — knownCriteria (finalized before Call 2 ran)
-  // is directly authoritative.
   const filteredMatches: TrialMatch[] = survivingRawMatches.map((m: any): TrialMatch => {
     const originalTrial = trialsByNormalizedId.get(String(m.nctId || '').trim().toUpperCase())
     const ctx = originalTrial ? extractionByTrial.get(originalTrial.nctId) : undefined
@@ -807,12 +599,6 @@ criteria only, not a final answer.`
     const criteriaFail    = [...verifiedFail,    ...(Array.isArray(m.interpretedCriteriaFail)    ? m.interpretedCriteriaFail    : [])]
     const criteriaPartial = [...verifiedPartial, ...(Array.isArray(m.interpretedCriteriaPartial) ? m.interpretedCriteriaPartial : [])]
 
-    // A confirmed deterministic failure downgrades matchStrength — this
-    // can only ever push a rating DOWN, never up. The rule engine only
-    // covers whatever subset of a trial's criteria the model successfully
-    // extracted as structured; treating full deterministic PASS as proof
-    // of a STRONG match would be trusting a partial view of the protocol
-    // as if it were the whole thing.
     let matchStrength: TrialMatch['matchStrength'] = m.matchStrength === 'STRONG' || m.matchStrength === 'PARTIAL' || m.matchStrength === 'LOW' ? m.matchStrength : 'PARTIAL'
     if (detSummary.hasFail) matchStrength = 'LOW'
 
@@ -832,23 +618,11 @@ criteria only, not a final answer.`
       nextSteps:    String(m.nextSteps || ''),
       deterministicResults: evaluated.map(e => ({
         description: e.criterion.description, category: e.criterion.category, result: e.result, evidence: e.evidence,
-        // "rule-" prefixed IDs are always rule-based (see
-        // lib/rule-based-extraction.ts) — true whether this criterion
-        // came from a fresh rule-based pass (miss) or was recovered from
-        // the cache (hit); the prefix survives the JSON round trip either
-        // way, so no separate bookkeeping is needed to preserve it.
         extractionSource: e.criterion.id.startsWith('rule-') ? 'rule_based' as const : 'ai_extracted' as const,
       })),
     }
   })
 
-  // Every genuine-miss trial's final merged criteria get written back
-  // here — awaited so the write reliably completes before this function
-  // (and the request that called it) finishes, not fire-and-forgotten
-  // into a serverless environment that might freeze the process right
-  // after responding. A write failure here is already handled inside
-  // lib/trial-criteria-cache.ts (logged, never thrown) — it cannot fail
-  // this match, only the caching optimization for next time.
   await Promise.all(cacheWrites)
 
   return {
@@ -862,20 +636,12 @@ criteria only, not a final answer.`
   }
 }
 
-// ── RxNorm medication enrichment ──────────────────────────────
-// First real caller of lib/rxnorm.ts — previously built, unit-tested, and
-// never invoked from anywhere. Runs once per match (not per criterion,
-// not per trial), concurrently with the CTgov/CTRI fetches below, so it
-// adds no serial latency in the common case. Skipped entirely when there
-// are no medications to enrich, so a patient with no medications on file
-// never pays for a call that couldn't do anything anyway.
 async function enrichClinicalData(clinicalData: ClinicalData | null): Promise<ClinicalData | null> {
   if (!clinicalData || clinicalData.medications.length === 0) return clinicalData
   const enrichedMeds = await enrichMedicationsWithRxNorm(clinicalData.medications)
   return { ...clinicalData, medications: enrichedMeds }
 }
 
-// ── Main export ───────────────────────────────────────────────
 export async function matchPatient(
   patient: Patient,
   clinicalData: ClinicalData | null = null,
@@ -898,10 +664,6 @@ export async function matchPatient(
   const allTrials = [...ctOutcome.trials, ...ctriOutcome.trials]
   const result = await scoreWithClaude(patient, allTrials, sourceStatus, enrichedClinicalData, cacheStore, llmConfig)
 
-  // If exactly one source failed but the other returned usable trials, the
-  // result is real but incomplete. Prepend a deterministic, code-authored
-  // disclosure — not one the model is asked to remember to write — so a
-  // coordinator always sees this regardless of what's in result.summary.
   if (allTrials.length > 0) {
     if (sourceStatus.ctgov === 'error' && sourceStatus.ctri === 'ok') {
       result.summary = `Note: ClinicalTrials.gov could not be reached during this search — results below are from CTRI (India) only. ${result.summary}`
