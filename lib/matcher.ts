@@ -500,6 +500,7 @@ Return this exact JSON structure:
       "matchScore": 0-100,
       "source": "ClinicalTrials.gov"|"CTRI",
       "nctId": "",
+      "trialIndex": 1,
       "title": "",
       "phase": "",
       "sponsor": "",
@@ -527,7 +528,10 @@ own interpretedCriteriaMet/Partial/Fail judgment. Do not return a "structuredCri
 there is nothing left to extract; a separate step already did that for every trial listed above.
 
 CRITICAL — DO NOT FABRICATE: Only return trials from the numbered list above. Every "nctId" you
-return MUST exactly match one of the trial IDs listed above, character for character. Never invent,
+return MUST exactly match one of the trial IDs listed above, character for character. Also set
+"trialIndex" to that trial's number from the "TRIAL N" heading above (e.g. TRIAL 3 → trialIndex: 3)
+— this is a redundant cross-check, since a short number is much less error-prone to recall correctly
+than retyping a full ID after extended reasoning. Never invent,
 extrapolate, or create an illustrative/example trial that is not in the list above — not even a
 "typical" or "plausible" one — regardless of how few trials were retrieved or how weak the matches
 are. If none of the listed trials are worth including, return a shorter "matches" array, or an empty
@@ -563,6 +567,23 @@ criteria only, not a final answer.`
 
   const knownIds = new Set(trials.map(t => t.nctId.trim().toUpperCase()))
   const rawMatches: any[] = result.matches
+
+  let recoveredCount = 0
+  for (const m of rawMatches) {
+    const claimedId = String(m?.nctId || '').trim().toUpperCase()
+    if (claimedId && knownIds.has(claimedId)) continue
+    const idx = Number(m?.trialIndex)
+    if (Number.isInteger(idx) && idx >= 1 && idx <= trials.length) {
+      const recovered = trials[idx - 1].nctId
+      console.warn(`[matcher] Recovered nctId "${recovered}" via trialIndex ${idx} for patient ${patient.patient_code} — model returned nctId "${m?.nctId}" which didn't match any retrieved trial.`)
+      m.nctId = recovered
+      recoveredCount++
+    }
+  }
+  if (recoveredCount > 0) {
+    console.warn(`[matcher] ${recoveredCount} match(es) recovered via trialIndex for patient ${patient.patient_code} — worth monitoring if this keeps happening frequently for the configured model.`)
+  }
+
   const survivingRawMatches = rawMatches.filter(m => {
     const id = String(m?.nctId || '').trim().toUpperCase()
     return id.length > 0 && knownIds.has(id)
