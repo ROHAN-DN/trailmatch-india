@@ -6,15 +6,6 @@ import { PLANS } from '../../../lib/plans'
 import { roleRequiresMFA } from '../../../lib/mfa'
 
 export const authOptions: NextAuthOptions = {
-  debug: true,
-  logger: {
-    error(code, metadata) {
-      console.error('[next-auth][error]', code, JSON.stringify(metadata))
-    },
-    warn(code) {
-      console.warn('[next-auth][warn]', code)
-    },
-  },
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID!,
